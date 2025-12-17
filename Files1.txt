@@ -1,0 +1,5673 @@
+checklist-pwa PWA APP
+Root folder: D:\Apps test\checklist-pwa
+
+D:\Apps test\checklist-pwa\backend\config\database.js
+const { Pool } = require('pg');
+require('dotenv').config();
+
+const pool = new Pool({
+  user: process.env.DB_USER || 'postgres',
+  host: process.env.DB_HOST || 'localhost',
+  database: process.env.DB_NAME || 'minth_checklists',
+  password: process.env.DB_PASSWORD || 'admin',
+  port: process.env.DB_PORT || 5432,
+  // Configurar zona horaria
+  timezone: 'America/Mexico_City'
+});
+
+// Verificar conexión
+pool.on('connect', () => {
+  console.log('✅ Conectado a PostgreSQL (Zona: America/Mexico_City)');
+});
+
+pool.on('error', (err) => {
+  console.error('❌ Error de PostgreSQL:', err);
+});
+
+module.exports = {
+  query: (text, params) => pool.query(text, params),
+  pool
+};
+
+D:\Apps test\checklist-pwa\backend\controllers\areaController.js
+const db = require('../config/database');
+
+const AreaController = {
+  // Obtener todas las áreas
+  async getAreas(req, res) {
+    try {
+      const result = await db.query('SELECT * FROM areas ORDER BY name');
+      res.json({ success: true, areas: result.rows });
+    } catch (error) {
+      console.error('Error obteniendo áreas:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // Crear nueva área
+  async createArea(req, res) {
+    try {
+      const { name, description } = req.body;
+      
+      const result = await db.query(
+        'INSERT INTO areas (name, description) VALUES ($1, $2) RETURNING *',
+        [name, description]
+      );
+      
+      res.status(201).json({ success: true, area: result.rows[0] });
+    } catch (error) {
+      console.error('Error creando área:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // Actualizar área
+  async updateArea(req, res) {
+    try {
+      const { id } = req.params;
+      const { name, description } = req.body;
+      
+      const result = await db.query(
+        'UPDATE areas SET name = $1, description = $2 WHERE id = $3 RETURNING *',
+        [name, description, id]
+      );
+      
+      if (result.rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'Área no encontrada' });
+      }
+      
+      res.json({ success: true, area: result.rows[0] });
+    } catch (error) {
+      console.error('Error actualizando área:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // Eliminar área
+  async deleteArea(req, res) {
+    try {
+      const { id } = req.params;
+      
+      const result = await db.query(
+        'DELETE FROM areas WHERE id = $1 RETURNING *',
+        [id]
+      );
+      
+      if (result.rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'Área no encontrada' });
+      }
+      
+      res.json({ success: true, message: 'Área eliminada correctamente' });
+    } catch (error) {
+      console.error('Error eliminando área:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+};
+
+module.exports = AreaController;
+
+D:\Apps test\checklist-pwa\backend\controllers\checklistController.js
+const db = require('../config/database');
+
+const ChecklistController = {
+  // Obtener todos los checklists - VERSIÓN CORREGIDA
+  async getAllChecklists(req, res) {
+  try {
+    console.log('📋 Obteniendo todos los checklists...');
+    
+    const result = await db.query(`
+      SELECT 
+        ct.*,
+        a.name as area_name,
+        p.name as project_name,
+        u.name as created_by_name
+      FROM checklist_templates ct
+      LEFT JOIN areas a ON ct.area_id = a.id
+      LEFT JOIN projects p ON ct.project_id = p.id
+      LEFT JOIN users u ON ct.created_by = u.id
+      ORDER BY ct.created_at DESC
+    `);
+    
+    console.log(`✅ ${result.rows.length} checklists encontrados`);
+    
+    // Parsear questions pero LIMPIAR imágenes (solo mantener metadata)
+    const checklists = result.rows.map(checklist => {
+      try {
+        let questions = [];
+        if (checklist.questions) {
+          if (typeof checklist.questions === 'string') {
+            questions = JSON.parse(checklist.questions);
+          } else if (typeof checklist.questions === 'object') {
+            questions = checklist.questions;
+          }
+        }
+        
+        // Limpiar imágenes grandes, mantener solo metadata
+        const cleanedQuestions = questions.map(q => {
+          const cleaned = { ...q };
+          
+          if (cleaned.image) {
+            // Guardar solo que tiene imagen, no la imagen completa
+            cleaned.hasImage = true;
+            cleaned.imageSize = cleaned.image.length;
+            // Eliminar el base64 completo para reducir tamaño
+            delete cleaned.image;
+          } else {
+            cleaned.hasImage = false;
+          }
+          
+          return cleaned;
+        });
+        
+        return {
+          ...checklist,
+          questions: Array.isArray(cleanedQuestions) ? cleanedQuestions : []
+        };
+      } catch (parseError) {
+        console.error(`❌ Error parseando questions del checklist ${checklist.id}:`, parseError);
+        return {
+          ...checklist,
+          questions: []
+        };
+      }
+    });
+
+    res.json({ 
+      success: true, 
+      checklists,
+      metadata: {
+        total: checklists.length,
+        message: 'Las imágenes no están incluidas en esta lista. Usa getChecklistById para obtener imágenes completas.'
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error obteniendo checklists:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+},
+
+  // Crear nuevo checklist - VERSIÓN CORREGIDA
+  async createChecklist(req, res) {
+    try {
+      const { name, description, area_id, project_id, iatf_code, questions } = req.body;
+      
+      console.log('📝 Creando checklist con datos:', {
+        name, 
+        description: description?.substring(0, 50) + '...',
+        area_id, 
+        project_id, 
+        iatf_code,
+        questionsCount: questions ? questions.length : 0
+      });
+
+      // Validar campos obligatorios
+      const requiredFields = { name, description, area_id, project_id, iatf_code };
+      const missingFields = Object.entries(requiredFields)
+        .filter(([key, value]) => !value)
+        .map(([key]) => key);
+      
+      if (missingFields.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: `Campos obligatorios faltantes: ${missingFields.join(', ')}`
+        });
+      }
+
+      // Validar que haya preguntas
+      if (!questions || !Array.isArray(questions) || questions.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'El checklist debe contener al menos una pregunta'
+        });
+      }
+
+      // Validar cada pregunta
+      const invalidQuestions = questions
+        .map((q, index) => ({ q, index }))
+        .filter(({ q }) => !q.text || !q.text.trim());
+      
+      if (invalidQuestions.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: `Las siguientes preguntas no tienen texto: ${invalidQuestions.map(({ index }) => index + 1).join(', ')}`
+        });
+      }
+
+      // Procesar preguntas - limitar tamaño de imágenes
+      const processedQuestions = questions.map(q => {
+        const processed = { ...q };
+        
+      // Si la imagen está truncada, elimínala
+  if (q.image && q.image.includes('[TRUNCATED]')) {
+    console.warn(`⚠️ Imagen truncada detectada, eliminando de pregunta: ${q.text?.substring(0, 30)}...`);
+    processed.image = null;
+    processed.imageError = 'Imagen fue truncada en edición anterior';
+  }
+  
+  // Validar que sea base64 válida
+  if (q.image && !q.image.startsWith('data:image/')) {
+    console.warn(`⚠️ Imagen no es base64 válida: ${q.text?.substring(0, 30)}...`);
+    processed.image = null;
+  }
+        
+        return processed;
+      });
+
+      // Verificar si la columna area_id existe
+      const tableInfo = await db.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'checklist_templates' 
+        AND column_name IN ('area_id', 'project_id')
+      `);
+      
+      const hasAreaId = tableInfo.rows.some(r => r.column_name === 'area_id');
+      const hasProjectId = tableInfo.rows.some(r => r.column_name === 'project_id');
+      
+      // Construir query dinámicamente
+      let columns = ['name', 'description', 'iatf_code', 'questions', 'created_by'];
+      let values = [name, description, iatf_code, JSON.stringify(processedQuestions), 1];
+      let placeholders = ['$1', '$2', '$3', '$4', '$5'];
+      
+      if (hasAreaId) {
+        columns.push('area_id');
+        values.push(area_id);
+        placeholders.push(`$${values.length}`);
+      }
+      
+      if (hasProjectId) {
+        columns.push('project_id');
+        values.push(project_id);
+        placeholders.push(`$${values.length}`);
+      }
+      
+      const query = `
+        INSERT INTO checklist_templates (${columns.join(', ')})
+        VALUES (${placeholders.join(', ')})
+        RETURNING *
+      `;
+      
+      console.log('📝 Query INSERT:', query);
+      console.log('📦 Valores:', values);
+
+      const result = await db.query(query, values);
+      
+      // Parsear questions para la respuesta
+      const createdChecklist = {
+        ...result.rows[0],
+        questions: processedQuestions
+      };
+
+      res.status(201).json({
+        success: true,
+        checklist: createdChecklist,
+        message: 'Checklist creado exitosamente'
+      });
+    } catch (error) {
+      console.error('❌ Error detallado creando checklist:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: error.message,
+        hint: 'Verifica que las columnas area_id y project_id existan en la tabla'
+      });
+    }
+  },
+
+  // Actualizar checklist
+  async updateChecklist(req, res) {
+    try {
+      const { id } = req.params;
+      const { name, description, area_id, project_id, iatf_code, questions } = req.body;
+
+      console.log('📝 Actualizando checklist ID:', id);
+      console.log('📊 Datos recibidos para update:');
+      console.log('- Nombre:', name);
+      console.log('- Descripción:', description?.substring(0, 50) + '...');
+      console.log('- Área ID:', area_id);
+      console.log('- Proyecto ID:', project_id);
+      console.log('- Código IATF:', iatf_code);
+      console.log('- Número de preguntas:', questions?.length || 0);
+
+      // DEBUG: Verificar imágenes en las preguntas recibidas
+      if (questions && Array.isArray(questions)) {
+        const imagesInfo = questions
+          .map((q, index) => ({
+            index,
+            hasImage: !!q.image,
+            imageLength: q.image ? q.image.length : 0,
+            imageName: q.imageName || 'N/A'
+          }))
+          .filter(info => info.hasImage);
+        
+        console.log(`📸 ${imagesInfo.length} preguntas con imagen recibidas:`);
+        imagesInfo.forEach(info => {
+          console.log(`   Pregunta ${info.index}: ${info.imageLength} chars, nombre: ${info.imageName}`);
+        });
+      }
+
+      // Validar campos obligatorios
+      const requiredFields = { name, description, area_id, project_id, iatf_code };
+      const missingFields = Object.entries(requiredFields)
+        .filter(([key, value]) => !value)
+        .map(([key]) => key);
+      
+      if (missingFields.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: `Campos obligatorios faltantes: ${missingFields.join(', ')}`
+        });
+      }
+
+      // Validar que haya preguntas
+      if (!questions || !Array.isArray(questions) || questions.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'El checklist debe contener al menos una pregunta'
+        });
+      }
+
+      // Procesar preguntas
+      const processedQuestions = questions.map(q => ({
+        ...q,
+        // Truncar imágenes grandes
+        image: q.image && q.image.length > 50000 ? 
+               q.image.substring(0, 50000) + '... [TRUNCATED]' : 
+               q.image
+      }));
+
+      // Construir query dinámicamente
+      const tableInfo = await db.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'checklist_templates' 
+        AND column_name IN ('area_id', 'project_id')
+      `);
+      
+      const hasAreaId = tableInfo.rows.some(r => r.column_name === 'area_id');
+      const hasProjectId = tableInfo.rows.some(r => r.column_name === 'project_id');
+      
+      let setClauses = ['name = $1', 'description = $2', 'iatf_code = $3', 'questions = $4', 'updated_at = CURRENT_TIMESTAMP'];
+      let values = [name, description, iatf_code, JSON.stringify(processedQuestions)];
+      
+      if (hasAreaId) {
+        setClauses.push('area_id = $' + (values.length + 1));
+        values.push(area_id);
+      }
+      
+      if (hasProjectId) {
+        setClauses.push('project_id = $' + (values.length + 1));
+        values.push(project_id);
+      }
+      
+      values.push(id); // Para el WHERE id = $n
+      
+      // Guardar en la base de datos
+      const query = `
+        UPDATE checklist_templates 
+        SET name = $1, description = $2, area_id = $3, project_id = $4, 
+            iatf_code = $5, questions = $6, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $7 
+        RETURNING *
+      `;
+      
+      const result = await db.query(query, [
+        name, description, area_id, project_id, iatf_code, 
+        JSON.stringify(questions), id
+      ]);
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'Checklist no encontrado' });
+      }
+
+      // DEBUG: Verificar qué se guardó
+      const savedChecklist = result.rows[0];
+      let savedQuestions = [];
+      if (savedChecklist.questions) {
+        if (typeof savedChecklist.questions === 'string') {
+          savedQuestions = JSON.parse(savedChecklist.questions);
+        } else if (typeof savedChecklist.questions === 'object') {
+          savedQuestions = savedChecklist.questions;
+        }
+      }
+      
+      const savedImages = savedQuestions.filter(q => q.image).length;
+      console.log(`💾 Checklist ${id} guardado con ${savedImages} imágenes`);
+      
+      res.json({ 
+        success: true, 
+        checklist: {
+          ...savedChecklist,
+          questions: savedQuestions
+        },
+        message: 'Checklist actualizado exitosamente'
+      });
+      
+    } catch (error) {
+      console.error('❌ Error actualizando checklist:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: error.message,
+        hint: 'Verifica el tamaño del JSON de questions'
+      });
+    }
+  },
+
+  // Eliminar checklist (sin cambios)
+  async deleteChecklist(req, res) {
+    try {
+      const { id } = req.params;
+
+      const result = await db.query(
+        'DELETE FROM checklist_templates WHERE id = $1 RETURNING *',
+        [id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'Checklist no encontrado' });
+      }
+
+      res.json({ 
+        success: true, 
+        message: 'Checklist eliminado correctamente' 
+      });
+    } catch (error) {
+      console.error('Error eliminando checklist:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // Obtener checklist por ID
+  async getChecklistById(req, res) {
+    try {
+      const { id } = req.params;
+
+      const result = await db.query(
+        `SELECT 
+          ct.*,
+          a.name as area_name,
+          p.name as project_name
+        FROM checklist_templates ct
+        LEFT JOIN areas a ON ct.area_id = a.id
+        LEFT JOIN projects p ON ct.project_id = p.id
+        WHERE ct.id = $1`,
+        [id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'Checklist no encontrado' });
+      }
+
+      const checklist = result.rows[0];
+      
+      // Parsear questions - IMPORTANTE: mantener las imágenes
+      let questions = [];
+      if (checklist.questions) {
+        try {
+          if (typeof checklist.questions === 'string') {
+            questions = JSON.parse(checklist.questions);
+          } else if (typeof checklist.questions === 'object') {
+            questions = checklist.questions;
+          }
+        } catch (parseError) {
+          console.error('Error parseando questions:', parseError);
+          questions = [];
+        }
+      }
+      
+      console.log(`✅ Checklist ${id} cargado con ${questions.length} preguntas`);
+      console.log(`📸 Preguntas con imagen: ${questions.filter(q => q.image).length}`);
+
+      res.json({ 
+        success: true, 
+        checklist: {
+          ...checklist,
+          questions: questions
+        }
+      });
+    } catch (error) {
+      console.error('Error obteniendo checklist:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+};
+
+module.exports = ChecklistController;
+
+D:\Apps test\checklist-pwa\backend\controllers\notificationController.js
+const db = require('../config/database');
+
+const NotificationController = {
+  // Obtener notificaciones del usuario
+  async getUserNotifications(req, res) {
+    try {
+      const { userId } = req.params;
+      
+      const result = await db.query(
+        `SELECT * FROM notifications 
+         WHERE user_id = $1 
+         ORDER BY created_at DESC 
+         LIMIT 50`,
+        [userId]
+      );
+      
+      res.json({ success: true, notifications: result.rows });
+    } catch (error) {
+      console.error('Error obteniendo notificaciones:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // Marcar notificación como leída
+  async markAsRead(req, res) {
+    try {
+      const { notificationId } = req.params;
+      
+      await db.query(
+        'UPDATE notifications SET is_read = true WHERE id = $1',
+        [notificationId]
+      );
+      
+      res.json({ success: true, message: 'Notificación marcada como leída' });
+    } catch (error) {
+      console.error('Error marcando notificación:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // Crear notificación del sistema
+  async createSystemNotification(req, res) {
+    try {
+      const { userId, title, message, type, relatedEntity, relatedId } = req.body;
+      
+      const result = await db.query(
+        `INSERT INTO notifications (user_id, title, message, type, related_entity, related_id)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        [userId, title, message, type, relatedEntity, relatedId]
+      );
+      
+      res.status(201).json({ success: true, notification: result.rows[0] });
+    } catch (error) {
+      console.error('Error creando notificación:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // Notificación para checklists pendientes
+  async checkPendingChecklists() {
+    try {
+      // Encontrar checklists pendientes de hoy
+      const result = await db.query(`
+        SELECT u.id as user_id, u.name as user_name, COUNT(ca.id) as pending_count
+        FROM users u
+        JOIN checklist_assignments ca ON u.id = ca.assigned_to
+        LEFT JOIN checklist_submissions cs ON ca.id = cs.assignment_id 
+          AND DATE(cs.submitted_at) = CURRENT_DATE
+        WHERE ca.is_active = true 
+          AND cs.id IS NULL
+        GROUP BY u.id, u.name
+        HAVING COUNT(ca.id) > 0
+      `);
+      
+      // Crear notificaciones para usuarios con pendientes
+      for (const row of result.rows) {
+        await db.query(
+          `INSERT INTO notifications (user_id, title, message, type)
+           VALUES ($1, 'Checklists Pendientes', 
+                   'Tienes ' || $2 || ' checklists pendientes para hoy', 'warning')`,
+          [row.user_id, row.pending_count]
+        );
+      }
+      
+      console.log(`📋 Notificaciones de recordatorio enviadas: ${result.rows.length}`);
+    } catch (error) {
+      console.error('Error verificando checklists pendientes:', error);
+    }
+  }
+};
+
+module.exports = NotificationController;
+
+D:\Apps test\checklist-pwa\backend\controllers\projectController.js
+const db = require('../config/database');
+
+const ProjectController = {
+  // Obtener todos los proyectos
+  async getProjects(req, res) {
+    try {
+      const result = await db.query(`
+        SELECT * FROM projects ORDER BY name
+      `);
+      res.json({ success: true, projects: result.rows });
+    } catch (error) {
+      console.error('Error obteniendo proyectos:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // Crear nuevo proyecto
+  async createProject(req, res) {
+    try {
+      const { name, description } = req.body;
+      
+      console.log('Creando proyecto:', { name, description });
+      
+      const result = await db.query(
+        'INSERT INTO projects (name, description) VALUES ($1, $2) RETURNING *',
+        [name, description]
+      );
+      
+      console.log('Proyecto creado:', result.rows[0]);
+      
+      res.status(201).json({ 
+        success: true, 
+        project: result.rows[0] 
+      });
+    } catch (error) {
+      console.error('Error creando proyecto:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: error.message
+      });
+    }
+  },
+
+  // Actualizar proyecto
+  async updateProject(req, res) {
+    try {
+      const { id } = req.params;
+      const { name, description } = req.body;
+      
+      console.log('Actualizando proyecto:', { id, name, description });
+      
+      const result = await db.query(
+        'UPDATE projects SET name = $1, description = $2 WHERE id = $3 RETURNING *',
+        [name, description, id]
+      );
+      
+      if (result.rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'Proyecto no encontrado' });
+      }
+      
+      res.json({ success: true, project: result.rows[0] });
+    } catch (error) {
+      console.error('Error actualizando proyecto:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // Eliminar proyecto
+  async deleteProject(req, res) {
+    try {
+      const { id } = req.params;
+      
+      const result = await db.query(
+        'DELETE FROM projects WHERE id = $1 RETURNING *',
+        [id]
+      );
+      
+      if (result.rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'Proyecto no encontrado' });
+      }
+      
+      res.json({ success: true, message: 'Proyecto eliminado correctamente' });
+    } catch (error) {
+      console.error('Error eliminando proyecto:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+};
+
+module.exports = ProjectController;
+
+D:\Apps test\checklist-pwa\backend\controllers\supervisorController.js
+const db = require('../config/database');
+
+const SupervisorController = {
+  async getSupervisorOperators(req, res) {
+    try {
+      const { supervisorId } = req.params;
+      
+      console.log(`📋 Obteniendo operadores del supervisor ID: ${supervisorId}`);
+      
+      const result = await db.query(`
+        SELECT 
+          o.id, 
+          o.username, 
+          o.name, 
+          o.role,
+          o.is_active
+        FROM users o
+        JOIN supervisor_operators so ON o.id = so.operator_id
+        WHERE so.supervisor_id = $1
+        ORDER BY o.name
+      `, [supervisorId]);
+      
+      console.log(`✅ Operadores asignados encontrados: ${result.rows.length}`);
+      
+      res.json({ 
+        success: true, 
+        operators: result.rows,
+        count: result.rows.length
+      });
+    } catch (error) {
+      console.error('❌ Error obteniendo operadores:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  async getAvailableOperators(req, res) {
+    try {
+      const { supervisorId } = req.params;
+      
+      console.log(`🔍 Buscando operadores disponibles para supervisor ID: ${supervisorId}`);
+      
+      // PRIMERO: Ver todos los operadores en el sistema
+      const allOperators = await db.query(`
+        SELECT id, username, name, role, is_active
+        FROM users 
+        WHERE role = 'operator' AND is_active = true
+        ORDER BY name
+      `);
+      
+      console.log(`📊 Total operadores en sistema: ${allOperators.rows.length}`);
+      allOperators.rows.forEach(op => {
+        console.log(`   Operador: ${op.name} (ID: ${op.id})`);
+      });
+      
+      // SEGUNDO: Ver operadores ya asignados a ESTE supervisor
+      const assignedOperators = await db.query(`
+        SELECT operator_id 
+        FROM supervisor_operators 
+        WHERE supervisor_id = $1
+      `, [supervisorId]);
+      
+      console.log(`📌 Operadores ya asignados a este supervisor: ${assignedOperators.rows.length}`);
+      assignedOperators.rows.forEach(ao => {
+        console.log(`   Operador ID asignado: ${ao.operator_id}`);
+      });
+      
+      // TERCERO: Filtrar operadores disponibles
+      const assignedIds = assignedOperators.rows.map(row => row.operator_id);
+      
+      const availableOperators = allOperators.rows.filter(operator => 
+        !assignedIds.includes(operator.id)
+      );
+      
+      console.log(`🎯 Operadores disponibles: ${availableOperators.length}`);
+      availableOperators.forEach(op => {
+        console.log(`   Disponible: ${op.name} (ID: ${op.id})`);
+      });
+      
+      res.json({ 
+        success: true, 
+        operators: availableOperators,
+        totalInSystem: allOperators.rows.length,
+        alreadyAssigned: assignedOperators.rows.length,
+        available: availableOperators.length
+      });
+      
+    } catch (error) {
+      console.error('❌ Error obteniendo operadores disponibles:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  async assignOperators(req, res) {
+    try {
+      const { supervisorId } = req.params;
+      const { operatorIds } = req.body;
+      
+      console.log(`🔄 Asignando operadores al supervisor ${supervisorId}:`, operatorIds);
+      
+      // Validar que venga array
+      if (!Array.isArray(operatorIds)) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'operatorIds debe ser un array' 
+        });
+      }
+      
+      // Verificar supervisor
+      const supervisor = await db.query(
+        'SELECT id, name FROM users WHERE id = $1',
+        [supervisorId]
+      );
+      
+      if (supervisor.rows.length === 0) {
+        return res.status(404).json({ 
+          success: false, 
+          error: 'Supervisor no encontrado' 
+        });
+      }
+      
+      console.log(`👨‍💼 Supervisor: ${supervisor.rows[0].name}`);
+      
+      // Si no hay operadores, limpiar asignaciones
+      if (operatorIds.length === 0) {
+        await db.query('DELETE FROM supervisor_operators WHERE supervisor_id = $1', [supervisorId]);
+        console.log('🧹 Todas las asignaciones eliminadas');
+        return res.json({ 
+          success: true, 
+          message: 'Todos los operadores removidos',
+          assignedCount: 0
+        });
+      }
+      
+      // Verificar que los operadores existen y son operadores
+      const operatorsCheck = await db.query(
+        'SELECT id, name FROM users WHERE id = ANY($1)',
+        [operatorIds]
+      );
+      
+      console.log(`📋 Operadores encontrados: ${operatorsCheck.rows.length} de ${operatorIds.length} solicitados`);
+      
+      if (operatorsCheck.rows.length !== operatorIds.length) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Algunos operadores no existen' 
+        });
+      }
+      
+      // TRANSACCIÓN: Eliminar antiguos e insertar nuevos
+      await db.query('BEGIN');
+      
+      try {
+        // 1. Eliminar todas las asignaciones actuales
+        const deleteResult = await db.query(
+          'DELETE FROM supervisor_operators WHERE supervisor_id = $1 RETURNING *',
+          [supervisorId]
+        );
+        console.log(`🗑️  Asignaciones eliminadas: ${deleteResult.rows.length}`);
+        
+        // 2. Insertar nuevas asignaciones
+        for (const operatorId of operatorIds) {
+          await db.query(
+            'INSERT INTO supervisor_operators (supervisor_id, operator_id) VALUES ($1, $2)',
+            [supervisorId, operatorId]
+          );
+          console.log(`   ✅ Asignado operador ID: ${operatorId}`);
+        }
+        
+        await db.query('COMMIT');
+        
+        console.log(`🎉 Asignación completada: ${operatorIds.length} operadores`);
+        
+        res.json({ 
+          success: true, 
+          message: `Operadores asignados correctamente a ${supervisor.rows[0].name}`,
+          assignedCount: operatorIds.length,
+          supervisorName: supervisor.rows[0].name,
+          operatorNames: operatorsCheck.rows.map(op => op.name)
+        });
+        
+      } catch (error) {
+        await db.query('ROLLBACK');
+        throw error;
+      }
+      
+    } catch (error) {
+      console.error('❌ Error asignando operadores:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: error.message,
+        details: 'Error en la asignación'
+      });
+    }
+  },
+
+  async removeOperator(req, res) {
+    try {
+      const { supervisorId, operatorId } = req.params;
+      
+      console.log(`❌ Removiendo operador ${operatorId} del supervisor ${supervisorId}`);
+      
+      const result = await db.query(
+        'DELETE FROM supervisor_operators WHERE supervisor_id = $1 AND operator_id = $2 RETURNING *',
+        [supervisorId, operatorId]
+      );
+      
+      if (result.rows.length === 0) {
+        return res.status(404).json({ 
+          success: false, 
+          error: 'Asignación no encontrada' 
+        });
+      }
+      
+      console.log('✅ Operador removido exitosamente');
+      
+      res.json({ 
+        success: true, 
+        message: 'Operador removido correctamente'
+      });
+    } catch (error) {
+      console.error('Error removiendo operador:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+};
+
+module.exports = SupervisorController;
+
+D:\Apps test\checklist-pwa\backend\controllers\userAdvancedController.js
+const db = require('../config/database');
+
+const UserAdvancedController = {
+  // Obtener usuario con áreas y operadores asignados
+  async getUserWithDetails(req, res) {
+    try {
+      const { id } = req.params;
+      
+      // Obtener usuario básico
+      const userResult = await db.query(
+        'SELECT id, username, name, role, created_at, is_active FROM users WHERE id = $1',
+        [id]
+      );
+      
+      if (userResult.rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'Usuario no encontrado' });
+      }
+      
+      const user = userResult.rows[0];
+      
+      // Obtener áreas del usuario
+      const areasResult = await db.query(
+        'SELECT area_name FROM user_areas WHERE user_id = $1 ORDER BY area_name',
+        [id]
+      );
+      user.areas = areasResult.rows.map(row => row.area_name);
+      
+      // Si es supervisor, obtener sus operadores
+      if (user.role === 'supervisor') {
+        const operatorsResult = await db.query(`
+          SELECT u.id, u.username, u.name, u.area 
+          FROM users u
+          JOIN supervisor_operators so ON u.id = so.operator_id
+          WHERE so.supervisor_id = $1 AND u.is_active = true
+          ORDER BY u.name
+        `, [id]);
+        user.operators = operatorsResult.rows;
+      }
+      
+      // Si es operador, obtener sus supervisores
+      if (user.role === 'operator') {
+        const supervisorsResult = await db.query(`
+          SELECT u.id, u.username, u.name 
+          FROM users u
+          JOIN supervisor_operators so ON u.id = so.supervisor_id
+          WHERE so.operator_id = $1 AND u.is_active = true
+          ORDER BY u.name
+        `, [id]);
+        user.supervisors = supervisorsResult.rows;
+      }
+      
+      res.json({ success: true, user });
+    } catch (error) {
+      console.error('Error obteniendo detalles de usuario:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // Actualizar áreas de un usuario
+  async updateUserAreas(req, res) {
+    try {
+      const { id } = req.params;
+      const { areas } = req.body; // Array de nombres de áreas
+      
+      // Verificar que el usuario existe
+      const userCheck = await db.query(
+        'SELECT id FROM users WHERE id = $1',
+        [id]
+      );
+      
+      if (userCheck.rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'Usuario no encontrado' });
+      }
+      
+      // Eliminar áreas actuales
+      await db.query('DELETE FROM user_areas WHERE user_id = $1', [id]);
+      
+      // Insertar nuevas áreas
+      for (const area of areas) {
+        await db.query(
+          'INSERT INTO user_areas (user_id, area_name) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [id, area]
+        );
+      }
+      
+      res.json({ 
+        success: true, 
+        message: 'Áreas actualizadas correctamente',
+        areas 
+      });
+    } catch (error) {
+      console.error('Error actualizando áreas de usuario:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // Asignar operadores a supervisor
+  async assignOperatorsToSupervisor(req, res) {
+    try {
+      const { supervisorId } = req.params;
+      const { operatorIds } = req.body; // Array de IDs de operadores
+      
+      // Verificar que el supervisor existe y es supervisor
+      const supervisorCheck = await db.query(
+        'SELECT id, role FROM users WHERE id = $1 AND role = $2',
+        [supervisorId, 'supervisor']
+      );
+      
+      if (supervisorCheck.rows.length === 0) {
+        return res.status(404).json({ 
+          success: false, 
+          error: 'Supervisor no encontrado o no tiene rol supervisor' 
+        });
+      }
+      
+      // Verificar que todos los operadores existen y son operadores
+      const operatorsCheck = await db.query(
+        'SELECT id FROM users WHERE id = ANY($1) AND role = $2',
+        [operatorIds, 'operator']
+      );
+      
+      if (operatorsCheck.rows.length !== operatorIds.length) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Uno o más operadores no existen o no tienen rol operador' 
+        });
+      }
+      
+      // Eliminar asignaciones actuales
+      await db.query('DELETE FROM supervisor_operators WHERE supervisor_id = $1', [supervisorId]);
+      
+      // Insertar nuevas asignaciones
+      for (const operatorId of operatorIds) {
+        await db.query(
+          'INSERT INTO supervisor_operators (supervisor_id, operator_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [supervisorId, operatorId]
+        );
+      }
+      
+      res.json({ 
+        success: true, 
+        message: 'Operadores asignados correctamente',
+        assignedCount: operatorIds.length
+      });
+    } catch (error) {
+      console.error('Error asignando operadores:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // Obtener operadores disponibles para supervisor
+  async getAvailableOperators(req, res) {
+    try {
+      const { supervisorId } = req.params;
+      
+      // Operadores que NO están asignados a este supervisor y tienen rol operator
+      const result = await db.query(`
+        SELECT u.id, u.username, u.name, u.is_active,
+               array_agg(ua.area_name) as areas
+        FROM users u
+        LEFT JOIN user_areas ua ON u.id = ua.user_id
+        WHERE u.role = 'operator' 
+          AND u.is_active = true
+          AND u.id NOT IN (
+            SELECT operator_id 
+            FROM supervisor_operators 
+            WHERE supervisor_id = $1
+          )
+        GROUP BY u.id, u.username, u.name, u.is_active
+        ORDER BY u.name
+      `, [supervisorId]);
+      
+      res.json({ success: true, operators: result.rows });
+    } catch (error) {
+      console.error('Error obteniendo operadores disponibles:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  // Obtener supervisores disponibles para operador
+  async getAvailableSupervisors(req, res) {
+    try {
+      const { operatorId } = req.params;
+      
+      const result = await db.query(`
+        SELECT u.id, u.username, u.name, u.is_active
+        FROM users u
+        WHERE u.role = 'supervisor' 
+          AND u.is_active = true
+          AND u.id NOT IN (
+            SELECT supervisor_id 
+            FROM supervisor_operators 
+            WHERE operator_id = $1
+          )
+        ORDER BY u.name
+      `, [operatorId]);
+      
+      res.json({ success: true, supervisors: result.rows });
+    } catch (error) {
+      console.error('Error obteniendo supervisores disponibles:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+};
+
+module.exports = UserAdvancedController;
+
+D:\Apps test\checklist-pwa\backend\controllers\userController.js
+const db = require('../config/database');
+
+const UserController = {
+  async getUsers(req, res) {
+    try {
+      const result = await db.query(`
+        SELECT id, username, name, role, created_at, is_active 
+        FROM users 
+        ORDER BY name
+      `);
+      res.json({ success: true, users: result.rows });
+    } catch (error) {
+      console.error('Error obteniendo usuarios:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  async createUser(req, res) {
+    try {
+      const { username, password, name, role, is_active = true } = req.body;
+      
+      const result = await db.query(
+        'INSERT INTO users (username, password, name, role, is_active) VALUES ($1, $2, $3, $4, $5) RETURNING id, username, name, role, created_at, is_active',
+        [username, password, name, role, is_active]
+      );
+
+      res.status(201).json({ success: true, user: result.rows[0] });
+    } catch (error) {
+      console.error('Error creando usuario:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  async updateUser(req, res) {
+    try {
+      const { id } = req.params;
+      const { username, name, role, is_active } = req.body;
+      
+      let query = 'UPDATE users SET username = $1, name = $2, role = $3, is_active = $4';
+      let params = [username, name, role, is_active, id];
+      let paramIndex = 5;
+      
+      if (req.body.password) {
+        query += `, password = $${paramIndex}`;
+        params.splice(paramIndex - 1, 0, req.body.password);
+        paramIndex++;
+      }
+      
+      query += ` WHERE id = $${paramIndex} RETURNING id, username, name, role, is_active`;
+      
+      const result = await db.query(query, params);
+      
+      if (result.rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'Usuario no encontrado' });
+      }
+
+      res.json({ success: true, user: result.rows[0] });
+    } catch (error) {
+      console.error('Error actualizando usuario:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
+
+  async deleteUser(req, res) {
+    try {
+      const { id } = req.params;
+      
+      const result = await db.query(
+        'DELETE FROM users WHERE id = $1 RETURNING *',
+        [id]
+      );
+      
+      if (result.rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'Usuario no encontrado' });
+      }
+      
+      res.json({ success: true, message: 'Usuario eliminado correctamente' });
+    } catch (error) {
+      console.error('Error eliminando usuario:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+};
+
+module.exports = UserController;
+
+D:\Apps test\checklist-pwa\backend\middleware
+
+D:\Apps test\checklist-pwa\backend\models\Checklist.js
+class Checklist {
+  constructor(db) {
+    this.db = db;
+  }
+
+  // Crear nuevo checklist
+  create(checklistData) {
+    const newChecklist = {
+      id: Date.now().toString(),
+      ...checklistData,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      version: '1.0',
+      iatfCode: checklistData.iatfCode || `IATF-${Date.now()}`,
+      status: 'pending'
+    };
+    
+    this.db.get('checklists').push(newChecklist).write();
+    return newChecklist;
+  }
+
+  // Obtener todos los checklists
+  getAll() {
+    return this.db.get('checklists').value();
+  }
+
+  // Obtener checklist por ID
+  getById(id) {
+    return this.db.get('checklists').find({ id }).value();
+  }
+
+  // Actualizar checklist
+  update(id, updateData) {
+    updateData.updatedAt = new Date().toISOString();
+    return this.db.get('checklists').find({ id }).assign(updateData);
+  }
+
+  // Eliminar checklist
+  delete(id) {
+    return this.db.get('checklists').remove({ id }).write();
+  }
+
+  // Obtener checklists por usuario
+  getByUserId(userId) {
+    return this.db.get('checklists').value().filter(checklist => 
+      checklist.assignedTo === userId
+    );
+  }
+
+  // Enviar respuestas de checklist
+  submit(checklistId, answers, userId) {
+    const submission = {
+      id: Date.now().toString(),
+      checklistId,
+      userId,
+      answers,
+      submittedAt: new Date().toISOString(),
+      status: 'completed'
+    };
+    
+    this.db.get('submissions').push(submission).write();
+    
+    // Actualizar estado del checklist
+    this.update(checklistId, {
+      status: 'completed',
+      completedAt: new Date().toISOString()
+    });
+    
+    return submission;
+  }
+}
+
+module.exports = Checklist;
+
+D:\Apps test\checklist-pwa\backend\models\IATFHistory.js
+class IATFHistory {
+  constructor(db) {
+    this.db = db;
+  }
+
+  logChange(checklistId, changeData) {
+    const logEntry = {
+      id: Date.now().toString(),
+      checklistId,
+      iatfCode: changeData.iatfCode,
+      version: changeData.version,
+      changeType: changeData.changeType, // 'created', 'updated', 'approved'
+      changedBy: changeData.changedBy,
+      changes: changeData.changes,
+      timestamp: new Date().toISOString(),
+      auditTrail: `IATF-${Date.now()}`
+    };
+
+    this.db.get('iatfHistory').push(logEntry).write();
+    return logEntry;
+  }
+
+  getChecklistHistory(checklistId) {
+    return this.db.get('iatfHistory')
+      .value()
+      .filter(entry => entry.checklistId === checklistId)
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  }
+}
+
+module.exports = IATFHistory;
+
+D:\Apps test\checklist-pwa\backend\routes\areas.js
+const express = require('express');
+const router = express.Router();
+const AreaController = require('../controllers/areaController');
+
+// Obtener todas las áreas
+router.get('/', AreaController.getAreas);
+
+// Crear nueva área
+router.post('/', AreaController.createArea);
+
+// Actualizar área
+router.put('/:id', AreaController.updateArea);
+
+// Eliminar área
+router.delete('/:id', AreaController.deleteArea);
+
+module.exports = router;
+
+D:\Apps test\checklist-pwa\backend\routes\auth.js
+const express = require('express');
+const router = express.Router();
+const db = require('../config/database');
+
+router.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+  
+  try {
+    // Convertir username a minúsculas para búsqueda case-insensitive
+    const usernameLower = username.toLowerCase();
+    
+    // IMPORTANTE: Buscar usuario SIN comparar contraseña en la query
+    const result = await db.query(
+      'SELECT id, username, password, name, role, is_active FROM users WHERE LOWER(username) = $1 AND is_active = true',
+      [usernameLower]
+    );
+    
+    if (result.rows.length > 0) {
+      const user = result.rows[0];
+      
+      // 🔥 COMPARACIÓN SIMPLE - Si la contraseña coincide (texto plano)
+      if (user.password === password) {
+        // Eliminar password del objeto user antes de enviarlo
+        const { password, ...userWithoutPassword } = user;
+        
+        res.json({
+          success: true,
+          user: {
+            id: user.id,
+            username: user.username,
+            name: user.name,
+            role: user.role,
+            area: 'Todos' // Temporal hasta que cargue áreas reales
+          },
+          token: `minth-token-${user.id}`
+        });
+      } else {
+        res.status(401).json({
+          success: false,
+          message: 'Usuario o contraseña incorrectos'
+        });
+      }
+    } else {
+      res.status(401).json({
+        success: false,
+        message: 'Usuario o contraseña incorrectos'
+      });
+    }
+  } catch (error) {
+    console.error('❌ Error en login:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error del servidor: ' + error.message
+    });
+  }
+});
+
+router.get('/me', async (req, res) => {
+  const token = req.headers.authorization;
+  
+  if (token && token.startsWith('minth-token-')) {
+    try {
+      const userId = token.replace('minth-token-', '');
+      const result = await db.query(
+        'SELECT id, username, name, role FROM users WHERE id = $1 AND is_active = true',
+        [userId]
+      );
+        
+      if (result.rows.length > 0) {
+        return res.json({ user: result.rows[0] });
+      }
+    } catch (error) {
+      console.error('Error verificando token:', error);
+    }
+  }
+  
+  res.status(401).json({ error: 'No autorizado' });
+});
+
+module.exports = router;
+
+D:\Apps test\checklist-pwa\backend\routes\checklists.js
+const express = require('express');
+const router = express.Router();
+const ChecklistController = require('../controllers/checklistController');
+
+// Obtener todos los checklists
+router.get('/', ChecklistController.getAllChecklists);
+
+// Obtener checklist por ID
+router.get('/:id', ChecklistController.getChecklistById);
+
+// Crear nuevo checklist
+router.post('/', ChecklistController.createChecklist);
+
+// Actualizar checklist
+router.put('/:id', ChecklistController.updateChecklist);
+
+// Eliminar checklist
+router.delete('/:id', ChecklistController.deleteChecklist);
+
+module.exports = router;
+
+D:\Apps test\checklist-pwa\backend\routes\projects.js
+const express = require('express');
+const router = express.Router();
+const ProjectController = require('../controllers/projectController');
+
+// Obtener todos los proyectos
+router.get('/', ProjectController.getProjects);
+
+// Crear nuevo proyecto
+router.post('/', ProjectController.createProject);
+
+// Actualizar proyecto
+router.put('/:id', ProjectController.updateProject);
+
+// Eliminar proyecto
+router.delete('/:id', ProjectController.deleteProject);
+
+module.exports = router;
+
+D:\Apps test\checklist-pwa\backend\routes\reports.js
+const express = require('express');
+const router = express.Router();
+
+router.get('/weekly', (req, res) => {
+  res.json({
+    period: 'Semana 45 - 2023',
+    totalChecklists: 15,
+    completed: 12,
+    pending: 3,
+    completionRate: 80
+  });
+});
+
+router.get('/monthly', (req, res) => {
+  res.json({
+    period: 'Noviembre 2023',
+    totalChecklists: 60,
+    completed: 48,
+    pending: 12,
+    completionRate: 80
+  });
+});
+
+router.get('/annual', (req, res) => {
+  res.json({
+    period: '2023',
+    totalChecklists: 720,
+    completed: 650,
+    pending: 70,
+    completionRate: 90.3
+  });
+});
+
+module.exports = router;
+
+D:\Apps test\checklist-pwa\backend\routes\supervisors.js
+const express = require('express');
+const router = express.Router();
+const SupervisorController = require('../controllers/supervisorController');
+
+// Obtener operadores asignados a supervisor
+router.get('/:supervisorId/operators', SupervisorController.getSupervisorOperators);
+
+// Obtener operadores disponibles para asignar
+router.get('/:supervisorId/available-operators', SupervisorController.getAvailableOperators);
+
+// Asignar operadores a supervisor
+router.post('/:supervisorId/operators', SupervisorController.assignOperators);
+
+// Remover operador de supervisor
+router.delete('/:supervisorId/operators/:operatorId', SupervisorController.removeOperator);
+
+module.exports = router;
+
+D:\Apps test\checklist-pwa\backend\routes\userAdvanced.js
+const express = require('express');
+const router = express.Router();
+const UserAdvancedController = require('../controllers/userAdvancedController');
+
+// Obtener usuario con detalles completos
+router.get('/:id/details', UserAdvancedController.getUserWithDetails);
+
+// Actualizar áreas de usuario
+router.put('/:id/areas', UserAdvancedController.updateUserAreas);
+
+// Asignar operadores a supervisor
+router.put('/supervisor/:supervisorId/operators', UserAdvancedController.assignOperatorsToSupervisor);
+
+// Obtener operadores disponibles para supervisor
+router.get('/supervisor/:supervisorId/available-operators', UserAdvancedController.getAvailableOperators);
+
+// Obtener supervisores disponibles para operador
+router.get('/operator/:operatorId/available-supervisors', UserAdvancedController.getAvailableSupervisors);
+
+module.exports = router;
+
+D:\Apps test\checklist-pwa\backend\routes\users.js
+const express = require('express');
+const router = express.Router();
+const UserController = require('../controllers/userController');
+
+// Obtener todos los usuarios
+router.get('/', UserController.getUsers);
+
+// Crear nuevo usuario
+router.post('/', UserController.createUser);
+
+// Actualizar usuario
+router.put('/:id', UserController.updateUser);
+
+// Eliminar usuario ← AÑADIR ESTA LÍNEA
+router.delete('/:id', UserController.deleteUser);
+
+module.exports = router;
+
+D:\Apps test\checklist-pwa\backend\scripts\
+
+D:\Apps test\checklist-pwa\backend\server.js
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const path = require('path');
+const fs = require('fs');
+require('dotenv').config();
+
+const app = express();
+
+// Middleware
+app.use(helmet({
+  contentSecurityPolicy: false
+}));
+app.use(cors());
+app.use(morgan('combined'));
+app.use(express.json({ limit: '50mb' })); // Aumentar de 10mb a 50mb
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// CONFIGURACIÓN CORRECTA DE ARCHIVOS ESTÁTICOS
+const frontendBuildPath = path.join(__dirname, '../frontend/build');
+
+console.log('📁 Ruta del frontend:', frontendBuildPath);
+
+// Verificar que existe la carpeta build
+if (fs.existsSync(frontendBuildPath)) {
+  console.log('✅ Carpeta build encontrada');
+  
+  // Servir TODOS los archivos estáticos de la carpeta build
+  app.use(express.static(frontendBuildPath));
+  
+  console.log('✅ Archivos estáticos configurados');
+} else {
+  console.log('❌ ERROR: No se encuentra la carpeta build en:', frontendBuildPath);
+  console.log('💡 Ejecuta: npm run build');
+}
+
+// ==================== IMPORTAR RUTAS API ====================
+// SOLO UNA VEZ cada importación - eliminar duplicados
+const authRoutes = require('./routes/auth');
+const reportRoutes = require('./routes/reports');
+const checklistRoutes = require('./routes/checklists');
+const areaRoutes = require('./routes/areas');
+const userRoutes = require('./routes/users'); // ← SOLO UNA VEZ
+const projectRoutes = require('./routes/projects');
+const userAdvancedRoutes = require('./routes/userAdvanced');
+const supervisorRoutes = require('./routes/supervisors');
+
+// ==================== CONFIGURAR RUTAS ====================
+app.use('/api/auth', authRoutes);
+app.use('/api/reports', reportRoutes);
+app.use('/api/checklists', checklistRoutes);
+app.use('/api/areas', areaRoutes);
+app.use('/api/users', userRoutes); // ← SOLO UNA VEZ
+app.use('/api/projects', projectRoutes);
+app.use('/api/user-advanced', userAdvancedRoutes);
+app.use('/api/supervisors', supervisorRoutes);
+
+// Ruta de salud
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    message: 'Sistema de Checklists funcionando',
+    mode: process.env.NODE_ENV || 'development',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Ruta para verificar conexión a PostgreSQL
+app.get('/api/db-status', async (req, res) => {
+  try {
+    const db = require('./config/database');
+    const result = await db.query('SELECT NOW() as time, version() as version');
+    res.json({ 
+      success: true, 
+      database: 'Conectado a PostgreSQL',
+      time: result.rows[0].time,
+      version: result.rows[0].version
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      error: 'Error conectando a PostgreSQL: ' + error.message 
+    });
+  }
+});
+
+// Ruta para probar las nuevas funciones
+app.get('/api/test-data', async (req, res) => {
+  try {
+    const db = require('./config/database');
+    
+    // Contar registros en cada tabla
+    const usersCount = await db.query('SELECT COUNT(*) FROM users');
+    const areasCount = await db.query('SELECT COUNT(*) FROM areas');
+    const checklistsCount = await db.query('SELECT COUNT(*) FROM checklist_templates');
+    
+    res.json({
+      success: true,
+      counts: {
+        users: parseInt(usersCount.rows[0].count),
+        areas: parseInt(areasCount.rows[0].count),
+        checklists: parseInt(checklistsCount.rows[0].count)
+      },
+      message: 'Base de datos funcionando correctamente'
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      error: 'Error accediendo a la base de datos: ' + error.message 
+    });
+  }
+});
+
+// EN PRODUCCIÓN: Servir React para todas las rutas que no sean API
+if (process.env.NODE_ENV === 'production') {
+  app.get('*', (req, res) => {
+    // Si la ruta empieza con /api, continuar
+    if (req.path.startsWith('/api/')) {
+      return res.status(404).json({ error: 'Ruta API no encontrada' });
+    }
+    
+    // Para todas las demás rutas, servir index.html
+    const indexPath = path.join(__dirname, '../frontend/build', 'index.html');
+    
+    if (!fs.existsSync(indexPath)) {
+      return res.status(500).json({
+        error: 'Archivo index.html no encontrado',
+        solution: 'Ejecuta: npm run build'
+      });
+    }
+    
+    res.sendFile(indexPath);
+  });
+}
+
+// EN DESARROLLO
+else {
+  app.get('/', (req, res) => {
+    res.json({
+      message: 'API de Checklists Backend - Modo Desarrollo',
+      frontend: 'http://localhost:3000',
+      api: 'http://localhost:5000/api',
+      health: 'http://localhost:5000/api/health',
+      dbStatus: 'http://localhost:5000/api/db-status',
+      testData: 'http://localhost:5000/api/test-data'
+    });
+  });
+}
+
+const PORT = process.env.PORT || 5000;
+
+app.listen(PORT, () => {
+  console.log('🚀 SISTEMA DE CHECKLISTS INICIADO');
+  console.log(`📍 Puerto: ${PORT}`);
+  console.log(`🌍 Modo: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`💻 URL Local: http://localhost:${PORT}`);
+  console.log(`📱 URL Celular: http://192.168.0.7:${PORT}`);
+  console.log(`🔗 API Health: http://localhost:${PORT}/api/health`);
+  console.log(`🗄️  DB Status: http://localhost:${PORT}/api/db-status`);
+  console.log(`🧪 Test Data: http://localhost:${PORT}/api/test-data`);
+});
+
+D:\Apps test\checklist-pwa\frontend\build\
+// Varios archivos y carpetas en la ruta D:\Apps test\checklist-pwa\frontend\build\
+
+D:\Apps test\checklist-pwa\frontend\build\index.html
+<!doctype html><html lang="es"><head><meta charset="utf-8"/><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/><meta http-equiv="Pragma" content="no-cache"/><meta http-equiv="Expires" content="0"/><link rel="icon" href="/favicon.ico"/><meta name="viewport" content="width=device-width,initial-scale=1"/><meta name="theme-color" content="#000000"/><meta name="description" content="Sistema de Checklists PWA"/><link rel="apple-touch-icon" href="/logo192.png"/><link rel="manifest" href="/manifest.json"/><title>Sistema de Checklists</title><script defer="defer" src="/static/js/main.a99ae828.js"></script></head><body><noscript>Necesitas habilitar JavaScript para ejecutar esta aplicación.</noscript><div id="root"></div></body></html>
+
+D:\Apps test\checklist-pwa\frontend\build\manifest.json
+{
+  "short_name": "Checklists",
+  "name": "Sistema de Checklists PWA",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    }
+  ],
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#2E7D32",
+  "background_color": "#ffffff",
+  "orientation": "portrait"
+}
+
+D:\Apps test\checklist-pwa\frontend\build\sw.js
+const CACHE_NAME = 'checklist-pwa-v2';
+const urlsToCache = [
+  '/',
+  '/static/js/bundle.js',
+  '/static/css/main.css',
+  '/manifest.json',
+  '/favicon.ico'
+];
+
+self.addEventListener('install', (event) => {
+  console.log('Service Worker instalándose...');
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then((cache) => {
+        console.log('Cache abierto');
+        // Agregar cada URL individualmente con manejo de errores
+        return Promise.all(
+          urlsToCache.map(url => {
+            return cache.add(url).catch(error => {
+              console.log(`Error cacheando ${url}:`, error);
+            });
+          })
+        );
+      })
+  );
+});
+
+self.addEventListener('fetch', (event) => {
+  event.respondWith(
+    caches.match(event.request)
+      .then((response) => {
+        // Devuelve el cache si existe, sino haz fetch
+        if (response) {
+          return response;
+        }
+        return fetch(event.request);
+      })
+  );
+});
+
+self.addEventListener('activate', (event) => {
+  console.log('Service Worker activado');
+  // Limpiar caches viejos
+  event.waitUntil(
+    caches.keys().then(cacheNames => {
+      return Promise.all(
+        cacheNames.map(cacheName => {
+          if (cacheName !== CACHE_NAME) {
+            console.log('Eliminando cache viejo:', cacheName);
+            return caches.delete(cacheName);
+          }
+        })
+      );
+    })
+  );
+});
+
+D:\Apps test\checklist-pwa\frontend\node_modules
+//Varios archivos y carpetas en la ruta D:\Apps test\checklist-pwa\frontend\node_modules
+
+D:\Apps test\checklist-pwa\frontend\public\index.html
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <link rel="icon" href="/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="description" content="Sistema de Checklists PWA" />
+    <link rel="apple-touch-icon" href="/logo192.png" />
+    <link rel="manifest" href="/manifest.json" />
+    <title>Sistema de Checklists</title>
+</head>
+<body>
+    <noscript>Necesitas habilitar JavaScript para ejecutar esta aplicación.</noscript>
+    <div id="root"></div>
+</body>
+</html>
+
+D:\Apps test\checklist-pwa\frontend\public\manifest.json
+{
+  "short_name": "Checklists",
+  "name": "Sistema de Checklists PWA",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    }
+  ],
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#2E7D32",
+  "background_color": "#ffffff",
+  "orientation": "portrait"
+}
+
+D:\Apps test\checklist-pwa\frontend\public\sw.js
+const CACHE_NAME = 'checklist-pwa-v2';
+const urlsToCache = [
+  '/',
+  '/static/js/bundle.js',
+  '/static/css/main.css',
+  '/manifest.json',
+  '/favicon.ico'
+];
+
+self.addEventListener('install', (event) => {
+  console.log('Service Worker instalándose...');
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then((cache) => {
+        console.log('Cache abierto');
+        // Agregar cada URL individualmente con manejo de errores
+        return Promise.all(
+          urlsToCache.map(url => {
+            return cache.add(url).catch(error => {
+              console.log(`Error cacheando ${url}:`, error);
+            });
+          })
+        );
+      })
+  );
+});
+
+self.addEventListener('fetch', (event) => {
+  event.respondWith(
+    caches.match(event.request)
+      .then((response) => {
+        // Devuelve el cache si existe, sino haz fetch
+        if (response) {
+          return response;
+        }
+        return fetch(event.request);
+      })
+  );
+});
+
+self.addEventListener('activate', (event) => {
+  console.log('Service Worker activado');
+  // Limpiar caches viejos
+  event.waitUntil(
+    caches.keys().then(cacheNames => {
+      return Promise.all(
+        cacheNames.map(cacheName => {
+          if (cacheName !== CACHE_NAME) {
+            console.log('Eliminando cache viejo:', cacheName);
+            return caches.delete(cacheName);
+          }
+        })
+      );
+    })
+  );
+});
+
+D:\Apps test\checklist-pwa\frontend\src\components\admin\AdminDashboard.js
+import React, { useState, useEffect } from 'react';
+import { Typography, Paper, Grid, Card, CardContent, Box, CircularProgress } from '@mui/material';
+import { Assessment, People, Checklist, Notifications, Category, Assignment } from '@mui/icons-material';
+import { realChecklistService } from '../../services/realApiService';
+
+const AdminDashboard = () => {
+  const [stats, setStats] = useState({
+    totalUsers: 0,
+    totalAreas: 0,
+    totalProjects: 0,
+    totalChecklists: 0,
+    activeUsers: 0,
+    pendingChecklists: 0
+  });
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadDashboardData();
+  }, []);
+
+  const loadDashboardData = async () => {
+    try {
+      setLoading(true);
+      
+      // Cargar datos en paralelo
+      const [usersResponse, areasResponse, projectsResponse, checklistsResponse] = await Promise.all([
+        realChecklistService.getUsers(),
+        realChecklistService.getAreas(),
+        realChecklistService.getProjects(),
+        realChecklistService.getAll()
+      ]);
+
+      const users = usersResponse.data.success ? usersResponse.data.users : [];
+      const areas = areasResponse.data.success ? areasResponse.data.areas : [];
+      const projects = projectsResponse.data.success ? projectsResponse.data.projects : [];
+      const checklists = checklistsResponse.data.success ? checklistsResponse.data.checklists : [];
+
+      setStats({
+        totalUsers: users.length,
+        totalAreas: areas.length,
+        totalProjects: projects.length,
+        totalChecklists: checklists.length,
+        activeUsers: users.filter(u => u.is_active).length,
+        pendingChecklists: 0 // Aquí podrías calcular checklists pendientes si tienes esa info
+      });
+
+    } catch (error) {
+      console.error('Error cargando dashboard:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const dashboardStats = [
+    { title: 'Total Usuarios', value: stats.totalUsers, icon: <People />, color: 'primary' },
+    { title: 'Usuarios Activos', value: stats.activeUsers, icon: <People />, color: 'success' },
+    { title: 'Áreas', value: stats.totalAreas, icon: <Category />, color: 'secondary' },
+    { title: 'Proyectos', value: stats.totalProjects, icon: <Assignment />, color: 'info' },
+    { title: 'Checklists', value: stats.totalChecklists, icon: <Checklist />, color: 'warning' },
+    { title: 'Pendientes', value: stats.pendingChecklists, icon: <Assessment />, color: 'error' }
+  ];
+
+  if (loading) {
+    return (
+      <Box display="flex" justifyContent="center" alignItems="center" minHeight="400px">
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  return (
+    <Box>
+      <Typography variant="h4" gutterBottom>
+        Dashboard de Administración
+      </Typography>
+        
+      <Grid container spacing={3} sx={{ mb: 4 }}>
+        {dashboardStats.map((stat, index) => (
+          <Grid item xs={12} sm={6} md={4} lg={2} key={index}>
+            <Card>
+              <CardContent>
+                <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                  <Box sx={{ mr: 2, color: `${stat.color}.main` }}>
+                    {stat.icon}
+                  </Box>
+                  <Box>
+                    <Typography variant="h4" component="div">
+                      {stat.value}
+                    </Typography>
+                    <Typography variant="body2" color="textSecondary">
+                      {stat.title}
+                    </Typography>
+                  </Box>
+                </Box>
+              </CardContent>
+            </Card>
+          </Grid>
+        ))}
+      </Grid>
+
+      <Paper sx={{ p: 3 }}>
+        <Typography variant="h6" gutterBottom>
+          Resumen General
+        </Typography>
+        <Typography paragraph>
+          Bienvenido al panel de administración. Desde aquí puedes gestionar todas las áreas del sistema.
+        </Typography>
+        <Typography variant="body2" color="textSecondary">
+          Usuarios registrados: {stats.totalUsers} | Áreas activas: {stats.totalAreas} | 
+          Proyectos: {stats.totalProjects} | Checklists: {stats.totalChecklists}
+        </Typography>
+      </Paper>
+    </Box>
+  );
+};
+
+export default AdminDashboard;
+
+D:\Apps test\checklist-pwa\frontend\src\components\admin\AreasManagement.js
+import React, { useState, useEffect } from 'react';
+import {
+  Typography, Paper, Button, Table, TableBody, TableCell,
+  TableContainer, TableHead, TableRow, IconButton, Dialog,
+  DialogTitle, DialogContent, DialogActions, TextField, Box,
+  Alert
+} from '@mui/material';
+import { Add, Edit, Delete } from '@mui/icons-material';
+import { realChecklistService } from '../../services/realApiService';
+
+const AreasManagement = () => {
+  const [areas, setAreas] = useState([]);
+  const [openDialog, setOpenDialog] = useState(false);
+  const [editingArea, setEditingArea] = useState(null);
+  const [newArea, setNewArea] = useState({ name: '', description: '' });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  // Cargar áreas reales desde la API
+  const loadAreas = async () => {
+    try {
+      setLoading(true);
+      const response = await realChecklistService.getAreas();
+      if (response.data.success) {
+        setAreas(response.data.areas);
+      }
+    } catch (error) {
+      setError('Error cargando áreas: ' + error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadAreas();
+  }, []);
+
+  const handleCreateArea = async () => {
+    try {
+      const response = await realChecklistService.createArea(newArea);
+      if (response.data.success) {
+        await loadAreas(); // Recargar áreas
+        setOpenDialog(false);
+        setNewArea({ name: '', description: '' });
+      }
+    } catch (error) {
+      setError('Error creando área: ' + error.message);
+    }
+  };
+
+  const handleUpdateArea = async (id) => {
+    try {
+      const response = await realChecklistService.updateArea(id, newArea);
+      if (response.data.success) {
+        await loadAreas(); // Recargar áreas
+        setOpenDialog(false);
+        setEditingArea(null);
+        setNewArea({ name: '', description: '' });
+      }
+    } catch (error) {
+      setError('Error actualizando área: ' + error.message);
+    }
+  };
+
+  const handleDeleteArea = async (id) => {
+    if (window.confirm('¿Estás seguro de que quieres eliminar esta área?')) {
+      try {
+        const response = await realChecklistService.deleteArea(id);
+        if (response.data.success) {
+          await loadAreas(); // Recargar áreas
+        }
+      } catch (error) {
+        setError('Error eliminando área: ' + error.message);
+      }
+    }
+  };
+
+  const handleEditArea = (area) => {
+    setEditingArea(area);
+    setNewArea({ name: area.name, description: area.description || '' });
+    setOpenDialog(true);
+  };
+
+  const handleSave = () => {
+    if (editingArea) {
+      handleUpdateArea(editingArea.id);
+    } else {
+      handleCreateArea();
+    }
+  };
+
+  return (
+    <Box>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 3 }}>
+        <Typography variant="h4">
+          Gestión de Áreas
+        </Typography>
+        <Button
+          variant="contained"
+          startIcon={<Add />}
+          onClick={() => {
+            setEditingArea(null);
+            setNewArea({ name: '', description: '' });
+            setOpenDialog(true);
+          }}
+        >
+          Nueva Área
+        </Button>
+      </Box>
+
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
+          {error}
+        </Alert>
+      )}
+
+      <TableContainer component={Paper}>
+        <Table>
+          <TableHead>
+            <TableRow>
+              <TableCell>Nombre</TableCell>
+              <TableCell>Descripción</TableCell>
+              <TableCell>Acciones</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {loading ? (
+              <TableRow>
+                <TableCell colSpan={3} align="center">
+                  Cargando áreas...
+                </TableCell>
+              </TableRow>
+            ) : areas.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={3} align="center">
+                  No hay áreas creadas. Crea la primera área.
+                </TableCell>
+              </TableRow>
+            ) : (
+              areas.map((area) => (
+                <TableRow key={area.id}>
+                  <TableCell>{area.name}</TableCell>
+                  <TableCell>{area.description}</TableCell>
+                  <TableCell>
+                    <IconButton 
+                      color="primary"
+                      onClick={() => handleEditArea(area)}
+                    >
+                      <Edit />
+                    </IconButton>
+                    <IconButton 
+                      color="error"
+                      onClick={() => handleDeleteArea(area.id)}
+                    >
+                      <Delete />
+                    </IconButton>
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </TableContainer>
+
+      <Dialog open={openDialog} onClose={() => setOpenDialog(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>
+          {editingArea ? 'Editar Área' : 'Crear Nueva Área'}
+        </DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Nombre del Área"
+            fullWidth
+            value={newArea.name}
+            onChange={(e) => setNewArea(prev => ({ ...prev, name: e.target.value }))}
+            sx={{ mb: 2 }}
+          />
+          <TextField
+            margin="dense"
+            label="Descripción"
+            fullWidth
+            multiline
+            rows={3}
+            value={newArea.description}
+            onChange={(e) => setNewArea(prev => ({ ...prev, description: e.target.value }))}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOpenDialog(false)}>Cancelar</Button>
+          <Button onClick={handleSave} variant="contained">
+            {editingArea ? 'Actualizar' : 'Crear'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+};
+
+export default AreasManagement;
+
+D:\Apps test\checklist-pwa\frontend\src\components\admin\ChecklistsManagement.js
+import React, { useState, useEffect } from 'react';
+import {
+  Paper,
+  Typography,
+  Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  IconButton,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  TextField,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  Box,
+  Chip,
+  Grid,
+  Card,
+  CardContent,
+  Alert
+} from '@mui/material';
+import {
+  Add,
+  Edit,
+  Delete,
+  Save,
+  Cancel
+} from '@mui/icons-material';
+import { realChecklistService } from '../../services/realApiService';
+
+const ChecklistsManagement = () => {
+  const [checklists, setChecklists] = useState([]);
+  const [areas, setAreas] = useState([]);
+  const [openDialog, setOpenDialog] = useState(false);
+  const [editingChecklist, setEditingChecklist] = useState(null);
+  const [newChecklist, setNewChecklist] = useState({
+    name: '',
+    description: '',
+    area_id: '',
+    project_id: '',
+    iatf_code: '',
+    questions: []
+  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  // Cargar checklists y áreas reales
+  const loadData = async () => {
+  try {
+    setLoading(true);
+    const [checklistsResponse, projectsResponse] = await Promise.all([
+      realChecklistService.getAll(),
+      realChecklistService.getProjects() // Solo cargar proyectos
+    ]);
+    
+    if (checklistsResponse.data.success) {
+      setChecklists(checklistsResponse.data.checklists);
+    }
+    if (projectsResponse.data.success) {
+      setProjects(projectsResponse.data.projects);
+    }
+  } catch (error) {
+    setError('Error cargando datos: ' + error.message);
+  } finally {
+    setLoading(false);
+  }
+};
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const handleCreateChecklist = async () => {
+    try {
+      const response = await realChecklistService.create(newChecklist);
+      if (response.data.success) {
+        await loadData();
+        setOpenDialog(false);
+        setNewChecklist({
+          name: '',
+          description: '',
+          area_id: '',
+          project_id: '',
+          iatf_code: '',
+          questions: []
+        });
+      }
+    } catch (error) {
+      setError('Error creando checklist: ' + error.message);
+    }
+  };
+
+  const handleEditChecklist = (checklist) => {
+    setEditingChecklist(checklist);
+    setNewChecklist({ ...checklist });
+    setOpenDialog(true);
+  };
+
+  const handleUpdateChecklist = async () => {
+    try {
+      const response = await realChecklistService.update(editingChecklist.id, newChecklist);
+      if (response.data.success) {
+        await loadData();
+        setOpenDialog(false);
+        setEditingChecklist(null);
+      }
+    } catch (error) {
+      setError('Error actualizando checklist: ' + error.message);
+    }
+  };
+
+  const handleDeleteChecklist = async (id) => {
+    if (window.confirm('¿Estás seguro de que quieres eliminar este checklist?')) {
+      try {
+        const response = await realChecklistService.delete(id);
+        if (response.data.success) {
+          await loadData();
+        }
+      } catch (error) {
+        setError('Error eliminando checklist: ' + error.message);
+      }
+    }
+  };
+
+  const handleSaveChecklist = () => {
+    if (editingChecklist) {
+      handleUpdateChecklist();
+    } else {
+      handleCreateChecklist();
+    }
+  };
+
+  const addQuestion = () => {
+    setNewChecklist(prev => ({
+      ...prev,
+      questions: [
+        ...prev.questions,
+        {
+          id: `q${Date.now()}`,
+          type: 'boolean',
+          text: '',
+          image: null
+        }
+      ]
+    }));
+  };
+
+  const updateQuestion = (questionId, field, value) => {
+    setNewChecklist(prev => ({
+      ...prev,
+      questions: prev.questions.map(q =>
+        q.id === questionId ? { ...q, [field]: value } : q
+      )
+    }));
+  };
+
+  const removeQuestion = (questionId) => {
+    setNewChecklist(prev => ({
+      ...prev,
+      questions: prev.questions.filter(q => q.id !== questionId)
+    }));
+  };
+
+  return (
+    <Box>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 3 }}>
+        <Typography variant="h4">
+          Gestión de Checklists
+        </Typography>
+        <Button
+          variant="contained"
+          startIcon={<Add />}
+          onClick={() => {
+            setEditingChecklist(null);
+            setNewChecklist({
+              name: '',
+              description: '',
+              area_id: '',
+              project_id: '',
+              iatf_code: '',
+              questions: []
+            });
+            setOpenDialog(true);
+          }}
+        >
+          Nuevo Checklist
+        </Button>
+      </Box>
+
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
+          {error}
+        </Alert>
+      )}
+
+      <TableContainer component={Paper}>
+        <Table>
+          <TableHead>
+            <TableRow>
+              <TableCell>Nombre</TableCell>
+              <TableCell>Área</TableCell>
+              <TableCell>Código IATF</TableCell>
+              <TableCell>Preguntas</TableCell>
+              <TableCell>Acciones</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {loading ? (
+              <TableRow>
+                <TableCell colSpan={5} align="center">
+                  Cargando checklists...
+                </TableCell>
+              </TableRow>
+            ) : checklists.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={5} align="center">
+                  No hay checklists creados. Crea el primer checklist.
+                </TableCell>
+              </TableRow>
+            ) : (
+              checklists.map((checklist) => (
+                <TableRow key={checklist.id}>
+                  <TableCell>{checklist.name}</TableCell>
+                  <TableCell>
+                    <Chip label={checklist.area_name || 'Sin área'} size="small" />
+                  </TableCell>
+                  <TableCell>{checklist.iatf_code}</TableCell>
+                  <TableCell>{checklist.questions?.length || 0}</TableCell>
+                  <TableCell>
+                    <IconButton
+                      color="primary"
+                      onClick={() => handleEditChecklist(checklist)}
+                    >
+                      <Edit />
+                    </IconButton>
+                    <IconButton
+                      color="error"
+                      onClick={() => handleDeleteChecklist(checklist.id)}
+                    >
+                      <Delete />
+                    </IconButton>
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </TableContainer>
+
+      {/* Diálogo para crear/editar checklist */}
+      <Dialog open={openDialog} onClose={() => setOpenDialog(false)} maxWidth="md" fullWidth>
+        <DialogTitle>
+          {editingChecklist ? 'Editar Checklist' : 'Crear Nuevo Checklist'}
+        </DialogTitle>
+        <DialogContent>
+          // En el Grid del formulario, deja solo estos campos:
+<Grid container spacing={2} sx={{ mt: 1 }}>
+  <Grid item xs={12} sm={6}>
+    <TextField
+      fullWidth
+      label="Nombre del Checklist"
+      value={newChecklist.name}
+      onChange={(e) => setNewChecklist(prev => ({ ...prev, name: e.target.value }))}
+    />
+  </Grid>
+  <Grid item xs={12} sm={6}>
+    <TextField
+      fullWidth
+      label="Código IATF"
+      value={newChecklist.iatf_code}
+      onChange={(e) => setNewChecklist(prev => ({ ...prev, iatf_code: e.target.value }))}
+    />
+  </Grid>
+  <Grid item xs={12} sm={6}>
+    <FormControl fullWidth>
+      <InputLabel>Proyecto</InputLabel>
+      <Select
+        value={newChecklist.project_id || ''}
+        label="Proyecto"
+        onChange={(e) => setNewChecklist(prev => ({ ...prev, project_id: e.target.value }))}
+      >
+        <MenuItem value="">Sin proyecto</MenuItem>
+        {projects.map(project => (
+          <MenuItem key={project.id} value={project.id}>
+            {project.name}
+          </MenuItem>
+        ))}
+      </Select>
+    </FormControl>
+  </Grid>
+  <Grid item xs={12}>
+    <TextField
+      fullWidth
+      label="Descripción"
+      multiline
+      rows={2}
+      value={newChecklist.description || ''}
+      onChange={(e) => setNewChecklist(prev => ({ ...prev, description: e.target.value }))}
+    />
+  </Grid>
+</Grid>
+
+          <Box sx={{ mt: 3 }}>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
+              <Typography variant="h6">Preguntas</Typography>
+              <Button onClick={addQuestion} startIcon={<Add />}>
+                Agregar Pregunta
+              </Button>
+            </Box>
+
+            {newChecklist.questions.map((question, index) => (
+              <Card key={question.id} sx={{ mb: 2 }}>
+                <CardContent>
+                  <Grid container spacing={2} alignItems="center">
+                    <Grid item xs={12} sm={5}>
+                      <TextField
+                        fullWidth
+                        label={`Pregunta ${index + 1}`}
+                        value={question.text}
+                        onChange={(e) => updateQuestion(question.id, 'text', e.target.value)}
+                      />
+                    </Grid>
+                    <Grid item xs={12} sm={3}>
+                      <FormControl fullWidth>
+                        <InputLabel>Tipo de respuesta</InputLabel>
+                        <Select
+                          value={question.type}
+                          label="Tipo de respuesta"
+                          onChange={(e) => updateQuestion(question.id, 'type', e.target.value)}
+                        >
+                          <MenuItem value="boolean">Sí/No</MenuItem>
+                          <MenuItem value="number">Numérico</MenuItem>
+                          <MenuItem value="text">Texto</MenuItem>
+                          <MenuItem value="photo">Foto</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                    <Grid item xs={12} sm={3}>
+                      <Button
+                        fullWidth
+                        variant="outlined"
+                        component="label"
+                      >
+                        Subir Imagen
+                        <input type="file" hidden accept="image/*" />
+                      </Button>
+                    </Grid>
+                    <Grid item xs={12} sm={1}>
+                      <IconButton
+                        color="error"
+                        onClick={() => removeQuestion(question.id)}
+                      >
+                        <Delete />
+                      </IconButton>
+                    </Grid>
+                  </Grid>
+                </CardContent>
+              </Card>
+            ))}
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOpenDialog(false)} startIcon={<Cancel />}>
+            Cancelar
+          </Button>
+          <Button 
+            onClick={handleSaveChecklist} 
+            variant="contained" 
+            startIcon={<Save />}
+          >
+            {editingChecklist ? 'Actualizar' : 'Crear'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+};
+
+export default ChecklistsManagement;
+
+D:\Apps test\checklist-pwa\frontend\src\components\admin\NotificationsAdmin.js
+import React from 'react';
+import { Typography, Paper, List, ListItem, ListItemText, Chip, Box } from '@mui/material';
+
+const NotificationsAdmin = () => {
+  const notifications = [
+    { id: 1, message: 'Nuevo checklist creado', type: 'info', time: 'Hace 2 horas' },
+    { id: 2, message: 'Operador asignado a nueva área', type: 'success', time: 'Hace 1 día' },
+    { id: 3, message: 'Checklist vencido en Producción', type: 'warning', time: 'Hace 2 días' }
+  ];
+
+  return (
+    <Box>
+      <Typography variant="h4" gutterBottom>
+        Notificaciones del Sistema
+      </Typography>
+      
+      <Paper>
+        <List>
+          {notifications.map((notification) => (
+            <ListItem key={notification.id} divider>
+              <ListItemText
+                primary={notification.message}
+                secondary={notification.time}
+              />
+              <Chip 
+                label={notification.type} 
+                color={
+                  notification.type === 'info' ? 'info' :
+                  notification.type === 'success' ? 'success' : 'warning'
+                }
+                size="small"
+              />
+            </ListItem>
+          ))}
+        </List>
+      </Paper>
+    </Box>
+  );
+};
+
+export default NotificationsAdmin;
+
+D:\Apps test\checklist-pwa\frontend\src\components\admin\ProjectsManagement.js
+import React, { useState, useEffect } from 'react';
+import {
+  Typography, Paper, Button, Table, TableBody, TableCell,
+  TableContainer, TableHead, TableRow, IconButton, Dialog,
+  DialogTitle, DialogContent, DialogActions, TextField, Box,
+  Alert
+} from '@mui/material';
+import { Add, Edit, Delete } from '@mui/icons-material';
+import { realChecklistService } from '../../services/realApiService';
+
+const ProjectsManagement = () => {
+  const [projects, setProjects] = useState([]);
+  const [openDialog, setOpenDialog] = useState(false);
+  const [editingProject, setEditingProject] = useState(null);
+  const [newProject, setNewProject] = useState({ 
+    name: '', 
+    description: '' 
+  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  // Cargar proyectos desde la API
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      const response = await realChecklistService.getProjects();
+      
+      if (response.data.success) {
+        setProjects(response.data.projects);
+      }
+    } catch (error) {
+      setError('Error cargando proyectos: ' + error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const handleCreateProject = async () => {
+    try {
+      const response = await realChecklistService.createProject(newProject);
+      if (response.data.success) {
+        await loadData();
+        setOpenDialog(false);
+        setNewProject({ name: '', description: '' });
+      }
+    } catch (error) {
+      setError('Error creando proyecto: ' + error.message);
+    }
+  };
+
+  const handleUpdateProject = async (id) => {
+    try {
+      const response = await realChecklistService.updateProject(id, newProject);
+      if (response.data.success) {
+        await loadData();
+        setOpenDialog(false);
+        setEditingProject(null);
+        setNewProject({ name: '', description: '' });
+      }
+    } catch (error) {
+      setError('Error actualizando proyecto: ' + error.message);
+    }
+  };
+
+  const handleDeleteProject = async (id) => {
+    if (window.confirm('¿Estás seguro de que quieres eliminar este proyecto?')) {
+      try {
+        const response = await realChecklistService.deleteProject(id);
+        if (response.data.success) {
+          await loadData();
+        }
+      } catch (error) {
+        setError('Error eliminando proyecto: ' + error.message);
+      }
+    }
+  };
+
+  const handleEditProject = (project) => {
+    setEditingProject(project);
+    setNewProject({ 
+      name: project.name, 
+      description: project.description || '' 
+    });
+    setOpenDialog(true);
+  };
+
+  const handleSave = () => {
+    if (editingProject) {
+      handleUpdateProject(editingProject.id);
+    } else {
+      handleCreateProject();
+    }
+  };
+
+  return (
+    <Box>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 3 }}>
+        <Typography variant="h4">
+          Gestión de Proyectos
+        </Typography>
+        <Button
+          variant="contained"
+          startIcon={<Add />}
+          onClick={() => {
+            setEditingProject(null);
+            setNewProject({ name: '', description: '' });
+            setOpenDialog(true);
+          }}
+        >
+          Nuevo Proyecto
+        </Button>
+      </Box>
+
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
+          {error}
+        </Alert>
+      )}
+
+      <TableContainer component={Paper}>
+        <Table>
+          <TableHead>
+            <TableRow>
+              <TableCell>Nombre</TableCell>
+              <TableCell>Descripción</TableCell>
+              <TableCell>Acciones</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {loading ? (
+              <TableRow>
+                <TableCell colSpan={3} align="center">
+                  Cargando proyectos...
+                </TableCell>
+              </TableRow>
+            ) : projects.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={3} align="center">
+                  No hay proyectos creados. Crea el primer proyecto.
+                </TableCell>
+              </TableRow>
+            ) : (
+              projects.map((project) => (
+                <TableRow key={project.id}>
+                  <TableCell>{project.name}</TableCell>
+                  <TableCell>{project.description}</TableCell>
+                  <TableCell>
+                    <IconButton 
+                      color="primary"
+                      onClick={() => handleEditProject(project)}
+                    >
+                      <Edit />
+                    </IconButton>
+                    <IconButton 
+                      color="error"
+                      onClick={() => handleDeleteProject(project.id)}
+                    >
+                      <Delete />
+                    </IconButton>
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </TableContainer>
+
+      <Dialog open={openDialog} onClose={() => setOpenDialog(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>
+          {editingProject ? 'Editar Proyecto' : 'Crear Nuevo Proyecto'}
+        </DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Nombre del Proyecto"
+            fullWidth
+            value={newProject.name}
+            onChange={(e) => setNewProject(prev => ({ ...prev, name: e.target.value }))}
+            sx={{ mb: 2 }}
+            required
+          />
+          <TextField
+            margin="dense"
+            label="Descripción"
+            fullWidth
+            multiline
+            rows={3}
+            value={newProject.description}
+            onChange={(e) => setNewProject(prev => ({ ...prev, description: e.target.value }))}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOpenDialog(false)}>Cancelar</Button>
+          <Button 
+            onClick={handleSave} 
+            variant="contained"
+            disabled={!newProject.name.trim()}
+          >
+            {editingProject ? 'Actualizar' : 'Crear'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+};
+
+export default ProjectsManagement;
+
+D:\Apps test\checklist-pwa\frontend\src\components\admin\ReportsAdmin.js
+import React from 'react';
+import { Typography, Paper, Grid, Box } from '@mui/material';
+
+const ReportsAdmin = () => {
+  return (
+    <Box>
+      <Typography variant="h4" gutterBottom>
+        Reportes de Administración
+      </Typography>
+      
+      <Grid container spacing={3}>
+        <Grid item xs={12} md={6}>
+          <Paper sx={{ p: 3 }}>
+            <Typography variant="h6" gutterBottom>
+              Cumplimiento por Área
+            </Typography>
+            <Typography>
+              Gráfico de cumplimiento de checklists por área...
+            </Typography>
+          </Paper>
+        </Grid>
+        
+        <Grid item xs={12} md={6}>
+          <Paper sx={{ p: 3 }}>
+            <Typography variant="h6" gutterBottom>
+              Estadísticas de Uso
+            </Typography>
+            <Typography>
+              Estadísticas generales del sistema...
+            </Typography>
+          </Paper>
+        </Grid>
+      </Grid>
+    </Box>
+  );
+};
+
+export default ReportsAdmin;
+
+D:\Apps test\checklist-pwa\frontend\src\components\admin\UsersManagement.js
+import React, { useState, useEffect } from 'react';
+import {
+  Typography, Paper, Button, Table, TableBody, TableCell,
+  TableContainer, TableHead, TableRow, IconButton, Dialog,
+  DialogTitle, DialogContent, DialogActions, TextField, Box,
+  Alert, FormControl, InputLabel, Select, MenuItem, Chip,
+  Grid, Checkbox, List, ListItem, ListItemText, Divider
+} from '@mui/material';
+import { Add, Edit, Delete, People, SupervisorAccount, Engineering, Refresh } from '@mui/icons-material';
+import { realChecklistService } from '../../services/realApiService';
+import api from '../../services/api';
+
+const UsersManagement = () => {
+  const [users, setUsers] = useState([]);
+  const [openDialog, setOpenDialog] = useState(false);
+  const [openSupervisorDialog, setOpenSupervisorDialog] = useState(false);
+  const [editingUser, setEditingUser] = useState(null);
+  const [selectedSupervisor, setSelectedSupervisor] = useState(null);
+  const [newUser, setNewUser] = useState({ 
+    username: '', 
+    password: '',
+    name: '', 
+    role: 'operator', 
+    is_active: true
+  });
+  const [availableOperators, setAvailableOperators] = useState([]);
+  const [selectedOperators, setSelectedOperators] = useState([]);
+  const [assignedOperators, setAssignedOperators] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  // Cargar usuarios
+  const loadUsers = async () => {
+    try {
+      setLoading(true);
+      const response = await realChecklistService.getUsers();
+      if (response.data.success) {
+        setUsers(response.data.users);
+      }
+    } catch (error) {
+      setError('Error cargando usuarios: ' + error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadUsers();
+  }, []);
+
+  // Cargar operadores del supervisor
+  const loadSupervisorData = async (supervisorId) => {
+    try {
+      // Cargar operadores asignados
+      const assignedResponse = await api.get(`/api/supervisors/${supervisorId}/operators`);
+      if (assignedResponse.data.success) {
+        setAssignedOperators(assignedResponse.data.operators || []);
+        setSelectedOperators(assignedResponse.data.operators.map(op => op.id) || []);
+      }
+      
+      // Cargar operadores disponibles
+      const availableResponse = await api.get(`/api/supervisors/${supervisorId}/available-operators`);
+      if (availableResponse.data.success) {
+        setAvailableOperators(availableResponse.data.operators || []);
+      }
+      
+    } catch (error) {
+      console.error('Error cargando datos del supervisor:', error);
+      setAssignedOperators([]);
+      setAvailableOperators([]);
+      setSelectedOperators([]);
+    }
+  };
+
+  const handleCreateUser = async () => {
+    try {
+      if (!newUser.username || !newUser.password || !newUser.name) {
+        setError('Usuario, contraseña y nombre son obligatorios');
+        return;
+      }
+
+      const response = await realChecklistService.createUser(newUser);
+      if (response.data.success) {
+        await loadUsers();
+        setOpenDialog(false);
+        resetForm();
+      }
+    } catch (error) {
+      setError('Error creando usuario: ' + error.message);
+    }
+  };
+
+  const handleUpdateUser = async () => {
+    try {
+      const userData = {
+        username: newUser.username,
+        name: newUser.name,
+        role: newUser.role,
+        is_active: newUser.is_active
+      };
+
+      if (newUser.password) {
+        userData.password = newUser.password;
+      }
+
+      const response = await realChecklistService.updateUser(editingUser.id, userData);
+      if (response.data.success) {
+        await loadUsers();
+        setOpenDialog(false);
+        resetForm();
+      }
+    } catch (error) {
+      setError('Error actualizando usuario: ' + error.message);
+    }
+  };
+
+  const handleManageSupervisor = async (user) => {
+    setSelectedSupervisor(user);
+    setOpenSupervisorDialog(true);
+    await loadSupervisorData(user.id);
+  };
+
+  const handleAssignOperators = async () => {
+    try {
+      const response = await api.post(`/api/supervisors/${selectedSupervisor.id}/operators`, {
+        operatorIds: selectedOperators
+      });
+      
+      if (response.data.success) {
+        alert(`${response.data.assignedCount} operadores asignados a ${selectedSupervisor.name}`);
+        await loadSupervisorData(selectedSupervisor.id);
+      }
+    } catch (error) {
+      setError('Error asignando operadores: ' + error.message);
+    }
+  };
+
+  const handleRefresh = async () => {
+    if (selectedSupervisor) {
+      await loadSupervisorData(selectedSupervisor.id);
+    }
+  };
+
+  const resetForm = () => {
+    setEditingUser(null);
+    setSelectedSupervisor(null);
+    setNewUser({ username: '', password: '', name: '', role: 'operator', is_active: true });
+    setSelectedOperators([]);
+    setAssignedOperators([]);
+    setAvailableOperators([]);
+    setError('');
+  };
+
+  const roles = [
+    { value: 'admin', label: 'Administrador', icon: <People /> },
+    { value: 'supervisor', label: 'Supervisor', icon: <SupervisorAccount /> },
+    { value: 'operator', label: 'Operador', icon: <Engineering /> }
+  ];
+
+  const getRoleColor = (role) => {
+    switch(role) {
+      case 'admin': return 'error';
+      case 'supervisor': return 'warning';
+      case 'operator': return 'success';
+      default: return 'default';
+    }
+  };
+
+  return (
+    <Box>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 3 }}>
+        <Typography variant="h4">Gestión de Usuarios</Typography>
+        <Button variant="contained" startIcon={<Add />} onClick={() => {
+          resetForm();
+          setOpenDialog(true);
+        }}>
+          Nuevo Usuario
+        </Button>
+      </Box>
+
+      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+
+      <TableContainer component={Paper}>
+        <Table>
+          <TableHead>
+            <TableRow>
+              <TableCell>Usuario</TableCell>
+              <TableCell>Nombre</TableCell>
+              <TableCell>Rol</TableCell>
+              <TableCell>Estado</TableCell>
+              <TableCell>Acciones</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {loading ? (
+              <TableRow><TableCell colSpan={5} align="center">Cargando...</TableCell></TableRow>
+            ) : users.map((user) => (
+              <TableRow key={user.id}>
+                <TableCell>{user.username}</TableCell>
+                <TableCell>{user.name}</TableCell>
+                <TableCell>
+                  <Chip label={user.role} color={getRoleColor(user.role)} size="small" />
+                </TableCell>
+                <TableCell>
+                  <Chip label={user.is_active ? 'Activo' : 'Inactivo'} 
+                    color={user.is_active ? 'success' : 'error'} size="small" />
+                </TableCell>
+                <TableCell>
+                  <IconButton size="small" onClick={() => {
+                    setEditingUser(user);
+                    setNewUser({...user, password: ''});
+                    setOpenDialog(true);
+                  }}><Edit /></IconButton>
+                  
+                  {user.role === 'supervisor' && (
+                    <IconButton size="small" color="secondary" onClick={() => handleManageSupervisor(user)}>
+                      <People />
+                    </IconButton>
+                  )}
+                  
+                  <IconButton size="small" color="error" onClick={() => {
+                    if (window.confirm(`¿Eliminar usuario ${user.name}?`)) {
+                      realChecklistService.deleteUser(user.id).then(loadUsers);
+                    }
+                  }}><Delete /></IconButton>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </TableContainer>
+
+      {/* Diálogo Usuario */}
+      <Dialog open={openDialog} onClose={() => setOpenDialog(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>{editingUser ? 'Editar Usuario' : 'Nuevo Usuario'}</DialogTitle>
+        <DialogContent>
+          <Grid container spacing={2} sx={{ mt: 1 }}>
+            <Grid item xs={12}>
+              <TextField fullWidth label="Usuario" value={newUser.username} 
+                onChange={(e) => setNewUser({...newUser, username: e.target.value})} 
+                disabled={!!editingUser} required />
+            </Grid>
+            <Grid item xs={12}>
+              <TextField fullWidth label={editingUser ? 'Nueva Contraseña' : 'Contraseña'} 
+                type="password" value={newUser.password} 
+                onChange={(e) => setNewUser({...newUser, password: e.target.value})} 
+                required={!editingUser} />
+            </Grid>
+            <Grid item xs={12}>
+              <TextField fullWidth label="Nombre" value={newUser.name} 
+                onChange={(e) => setNewUser({...newUser, name: e.target.value})} required />
+            </Grid>
+            <Grid item xs={12}>
+              <FormControl fullWidth>
+                <InputLabel>Rol</InputLabel>
+                <Select value={newUser.role} label="Rol" 
+                  onChange={(e) => setNewUser({...newUser, role: e.target.value})}>
+                  {roles.map(r => <MenuItem key={r.value} value={r.value}>{r.label}</MenuItem>)}
+                </Select>
+              </FormControl>
+            </Grid>
+            {editingUser && (
+              <Grid item xs={12}>
+                <FormControl fullWidth>
+                  <InputLabel>Estado</InputLabel>
+                  <Select value={newUser.is_active} label="Estado" 
+                    onChange={(e) => setNewUser({...newUser, is_active: e.target.value})}>
+                    <MenuItem value={true}>Activo</MenuItem>
+                    <MenuItem value={false}>Inactivo</MenuItem>
+                  </Select>
+                </FormControl>
+              </Grid>
+            )}
+          </Grid>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOpenDialog(false)}>Cancelar</Button>
+          <Button variant="contained" 
+            onClick={editingUser ? handleUpdateUser : handleCreateUser}
+            disabled={!newUser.username || !newUser.name || (!editingUser && !newUser.password)}>
+            {editingUser ? 'Actualizar' : 'Crear'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Diálogo Supervisor */}
+      <Dialog open={openSupervisorDialog} onClose={() => setOpenSupervisorDialog(false)} maxWidth="md" fullWidth>
+        <DialogTitle>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <SupervisorAccount />
+            Operadores de {selectedSupervisor?.name}
+          </Box>
+        </DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="textSecondary" gutterBottom>
+            Selecciona los operadores que serán supervisados por {selectedSupervisor?.name}
+          </Typography>
+          
+          {availableOperators.length === 0 && assignedOperators.length === 0 ? (
+            <Alert severity="info" sx={{ my: 2 }}>
+              No hay operadores disponibles en el sistema. Crea usuarios con rol "Operador".
+            </Alert>
+          ) : (
+            <>
+              {availableOperators.length > 0 && (
+                <>
+                  <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>
+                    Operadores Disponibles ({availableOperators.length}):
+                  </Typography>
+                  <List dense sx={{ maxHeight: 200, overflow: 'auto', border: '1px solid #e0e0e0', borderRadius: 1 }}>
+                    {availableOperators.map((operator) => (
+                      <ListItem key={operator.id} divider dense>
+                        <Checkbox
+                          size="small"
+                          checked={selectedOperators.includes(operator.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedOperators([...selectedOperators, operator.id]);
+                            } else {
+                              setSelectedOperators(selectedOperators.filter(id => id !== operator.id));
+                            }
+                          }}
+                        />
+                        <ListItemText
+                          primary={operator.name}
+                          secondary={`Usuario: ${operator.username}`}
+                        />
+                      </ListItem>
+                    ))}
+                  </List>
+                </>
+              )}
+              
+              {assignedOperators.length > 0 && (
+                <>
+                  <Typography variant="subtitle2" sx={{ mt: 3, mb: 1 }}>
+                    Operadores Actualmente Asignados ({assignedOperators.length}):
+                  </Typography>
+                  <List dense sx={{ maxHeight: 200, overflow: 'auto', border: '1px solid #e0e0e0', borderRadius: 1 }}>
+                    {assignedOperators.map((operator) => (
+                      <ListItem key={operator.id} divider dense>
+                        <Checkbox
+                          size="small"
+                          checked={selectedOperators.includes(operator.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedOperators([...selectedOperators, operator.id]);
+                            } else {
+                              setSelectedOperators(selectedOperators.filter(id => id !== operator.id));
+                            }
+                          }}
+                        />
+                        <ListItemText
+                          primary={operator.name}
+                          secondary={`Usuario: ${operator.username}`}
+                        />
+                      </ListItem>
+                    ))}
+                  </List>
+                </>
+              )}
+            </>
+          )}
+          
+          <Divider sx={{ my: 2 }} />
+          
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Typography variant="body2">
+              Total seleccionados: <strong>{selectedOperators.length}</strong> operadores
+            </Typography>
+            <Button 
+              size="small" 
+              onClick={() => setSelectedOperators([])}
+              disabled={selectedOperators.length === 0}
+            >
+              Limpiar selección
+            </Button>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOpenSupervisorDialog(false)}>Cancelar</Button>
+          <Button startIcon={<Refresh />} onClick={handleRefresh}>Refrescar</Button>
+          <Button variant="contained" onClick={handleAssignOperators}>Guardar</Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+};
+
+export default UsersManagement;
+
+D:\Apps test\checklist-pwa\frontend\src\components\layout\MinthHeader.js
+import React from 'react';
+import {
+  AppBar,
+  Toolbar,
+  Typography,
+  Box,
+  IconButton,
+  Menu,
+  MenuItem
+} from '@mui/material';
+import {
+  AccountCircle,
+  ExitToApp,
+  Checklist
+} from '@mui/icons-material';
+import { useAuth } from '../../context/AuthContext';
+
+const MinthHeader = ({ onLogout, currentTab, onTabChange }) => {
+  const [anchorEl, setAnchorEl] = React.useState(null);
+  const { currentUser } = useAuth();
+
+  const handleMenu = (event) => {
+    setAnchorEl(event.currentTarget);
+  };
+
+  const handleClose = () => {
+    setAnchorEl(null);
+  };
+
+  const handleLogout = () => {
+    handleClose();
+    onLogout();
+  };
+
+  return (
+    <AppBar position="static" elevation={2}>
+      <Toolbar>
+        {/* Logo Minth */}
+        <Box sx={{ display: 'flex', alignItems: 'center', mr: 3 }}>
+          <Checklist sx={{ fontSize: 32, mr: 1 }} />
+          <Typography variant="h6" component="div" sx={{ fontWeight: 'bold' }}>
+            Minth Checklists
+          </Typography>
+        </Box>
+
+        <Box sx={{ flexGrow: 1 }} />
+
+        {/* Información del usuario */}
+        <Typography variant="body2" sx={{ mr: 2 }}>
+          {currentUser?.name} | {currentUser?.role}
+        </Typography>
+
+        <IconButton
+          size="large"
+          aria-label="account of current user"
+          aria-controls="menu-appbar"
+          aria-haspopup="true"
+          onClick={handleMenu}
+          color="inherit"
+        >
+          <AccountCircle />
+        </IconButton>
+        
+        <Menu
+          id="menu-appbar"
+          anchorEl={anchorEl}
+          anchorOrigin={{
+            vertical: 'top',
+            horizontal: 'right',
+          }}
+          keepMounted
+          transformOrigin={{
+            vertical: 'top',
+            horizontal: 'right',
+          }}
+          open={Boolean(anchorEl)}
+          onClose={handleClose}
+        >
+          <MenuItem onClick={handleClose}>Mi Perfil</MenuItem>
+          <MenuItem onClick={handleLogout}>
+            <ExitToApp sx={{ mr: 1 }} />
+            Cerrar Sesión
+          </MenuItem>
+        </Menu>
+      </Toolbar>
+    </AppBar>
+  );
+};
+
+export default MinthHeader;
+
+D:\Apps test\checklist-pwa\frontend\src\components\operator\NotificationsOperator.js
+import React from 'react';
+import { Typography, Paper, List, ListItem, ListItemText, Chip, Box } from '@mui/material';
+
+const NotificationsOperator = () => {
+  const notifications = [
+    { id: 1, message: 'Recordatorio: Checklist de arranque pendiente', type: 'warning', time: 'Hace 15 min' },
+    { id: 2, message: 'Checklist de seguridad completado', type: 'success', time: 'Hace 2 horas' },
+    { id: 3, message: 'Nuevo checklist asignado', type: 'info', time: 'Hace 1 día' }
+  ];
+
+  return (
+    <Box>
+      <Typography variant="h4" gutterBottom>
+        Mis Notificaciones
+      </Typography>
+      
+      <Paper>
+        <List>
+          {notifications.map((notification) => (
+            <ListItem key={notification.id} divider>
+              <ListItemText
+                primary={notification.message}
+                secondary={notification.time}
+              />
+              <Chip 
+                label={notification.type} 
+                color={
+                  notification.type === 'info' ? 'info' :
+                  notification.type === 'success' ? 'success' : 'warning'
+                }
+                size="small"
+              />
+            </ListItem>
+          ))}
+        </List>
+      </Paper>
+    </Box>
+  );
+};
+
+export default NotificationsOperator;
+
+D:\Apps test\checklist-pwa\frontend\src\components\operator\OperatorChecklists.js
+import React, { useState } from 'react';
+import {
+  Typography, Paper, Button, Card, CardContent, Grid, Box, Chip
+} from '@mui/material';
+import { PlayArrow, CheckCircle, Schedule } from '@mui/icons-material';
+
+const OperatorChecklists = () => {
+  const [checklists] = useState([
+    { id: '1', name: 'Arranque de Máquina ABC', area: 'Producción', status: 'pending', due: 'En 30 min' },
+    { id: '2', name: 'Checklist Seguridad', area: 'Seguridad', status: 'completed', due: 'Completado' },
+    { id: '3', name: 'Control Calidad', area: 'Calidad', status: 'pending', due: 'En 2 horas' }
+  ]);
+
+  return (
+    <Box>
+      <Typography variant="h4" gutterBottom>
+        Mis Checklists
+      </Typography>
+      
+      <Grid container spacing={3}>
+        {checklists.map((checklist) => (
+          <Grid item xs={12} key={checklist.id}>
+            <Card>
+              <CardContent>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <Box>
+                    <Typography variant="h6">{checklist.name}</Typography>
+                    <Typography variant="body2" color="textSecondary">
+                      {checklist.area}
+                    </Typography>
+                    <Box sx={{ mt: 1 }}>
+                      <Chip 
+                        icon={checklist.status === 'pending' ? <Schedule /> : <CheckCircle />}
+                        label={checklist.status === 'pending' ? 'Pendiente' : 'Completado'}
+                        color={checklist.status === 'pending' ? 'warning' : 'success'}
+                        size="small"
+                      />
+                      <Chip 
+                        label={checklist.due}
+                        variant="outlined"
+                        size="small"
+                        sx={{ ml: 1 }}
+                      />
+                    </Box>
+                  </Box>
+                  {checklist.status === 'pending' && (
+                    <Button
+                      variant="contained"
+                      startIcon={<PlayArrow />}
+                    >
+                      Comenzar
+                    </Button>
+                  )}
+                </Box>
+              </CardContent>
+            </Card>
+          </Grid>
+        ))}
+      </Grid>
+    </Box>
+  );
+};
+
+export default OperatorChecklists;
+
+D:\Apps test\checklist-pwa\frontend\src\components\roles\AdminApp.js
+import React, { useState } from 'react';
+import {
+  AppBar,
+  Toolbar,
+  Typography,
+  Container,
+  Tabs,
+  Tab,
+  Box,
+  IconButton,
+  Menu,
+  MenuItem
+} from '@mui/material';
+import {
+  AccountCircle,
+  ExitToApp,
+  Checklist,
+  Dashboard,
+  Category,
+  Assignment,
+  Assessment,
+  Notifications,
+  People
+} from '@mui/icons-material';
+import { useAuth } from '../../context/AuthContext';
+
+// Componentes de Admin
+import AdminDashboard from '../admin/AdminDashboard';
+import AreasManagement from '../admin/AreasManagement';
+import ProjectsManagement from '../admin/ProjectsManagement';
+import UsersManagement from '../admin/UsersManagement'; // ← Ahora maneja todos los usuarios
+import ChecklistsManagement from '../admin/ChecklistsManagement';
+import ReportsAdmin from '../admin/ReportsAdmin';
+import NotificationsAdmin from '../admin/NotificationsAdmin';
+
+function TabPanel({ children, value, index, ...other }) {
+  return (
+    <div
+      role="tabpanel"
+      hidden={value !== index}
+      id={`admin-tabpanel-${index}`}
+      aria-labelledby={`admin-tab-${index}`}
+      {...other}
+    >
+      {value === index && <Box sx={{ p: 3 }}>{children}</Box>}
+    </div>
+  );
+}
+
+const AdminApp = () => {
+  const [currentTab, setCurrentTab] = useState(0);
+  const [anchorEl, setAnchorEl] = useState(null);
+  const { currentUser, logout } = useAuth();
+
+  const handleTabChange = (event, newValue) => {
+    setCurrentTab(newValue);
+  };
+
+  const handleMenu = (event) => {
+    setAnchorEl(event.currentTarget);
+  };
+
+  const handleClose = () => {
+    setAnchorEl(null);
+  };
+
+  const handleLogout = () => {
+    logout();
+    handleClose();
+  };
+
+  // 🎯 TABS ACTUALIZADAS - SIN REDUNDANCIAS
+  const tabs = [
+    { 
+      label: 'Dashboard', 
+      icon: <Dashboard />, 
+      component: <AdminDashboard /> 
+    },
+    { 
+      label: 'Áreas', 
+      icon: <Category />, 
+      component: <AreasManagement /> 
+    },
+    { 
+      label: 'Proyectos', 
+      icon: <Assignment />, 
+      component: <ProjectsManagement /> 
+    },
+    { 
+      label: 'Usuarios', 
+      icon: <People />, 
+      component: <UsersManagement /> // ← ÚNICA gestión de usuarios
+    },
+    { 
+      label: 'Checklists', 
+      icon: <Checklist />, 
+      component: <ChecklistsManagement /> 
+    },
+    { 
+      label: 'Reportes', 
+      icon: <Assessment />, 
+      component: <ReportsAdmin /> 
+    },
+    { 
+      label: 'Notificaciones', 
+      icon: <Notifications />, 
+      component: <NotificationsAdmin /> 
+    }
+  ];
+
+  return (
+    <Box sx={{ flexGrow: 1 }}>
+      <AppBar position="static" elevation={3}>
+        <Toolbar>
+          <Box sx={{ display: 'flex', alignItems: 'center', mr: 3 }}>
+            <Checklist sx={{ fontSize: 32, mr: 1 }} />
+            <Typography variant="h6" component="div" sx={{ flexGrow: 1, fontWeight: 'bold' }}>
+              Minth Checklists
+            </Typography>
+          </Box>
+
+          <Box sx={{ flexGrow: 1 }} />
+
+          <Typography variant="body2" sx={{ mr: 2 }}>
+            {currentUser?.name} | {currentUser?.role}
+          </Typography>
+
+          <IconButton
+            size="large"
+            aria-label="account of current user"
+            aria-controls="menu-appbar"
+            aria-haspopup="true"
+            onClick={handleMenu}
+            color="inherit"
+          >
+            <AccountCircle />
+          </IconButton>
+            
+          <Menu
+            id="menu-appbar"
+            anchorEl={anchorEl}
+            anchorOrigin={{
+              vertical: 'top',
+              horizontal: 'right',
+            }}
+            keepMounted
+            transformOrigin={{
+              vertical: 'top',
+              horizontal: 'right',
+            }}
+            open={Boolean(anchorEl)}
+            onClose={handleClose}
+          >
+            <MenuItem onClick={handleClose}>Mi Perfil</MenuItem>
+            <MenuItem onClick={handleLogout}>
+              <ExitToApp sx={{ mr: 1 }} />
+              Cerrar Sesión
+            </MenuItem>
+          </Menu>
+        </Toolbar>
+
+        {/* TABS SIMPLIFICADAS */}
+        <Tabs 
+          value={currentTab} 
+          onChange={handleTabChange}
+          variant="scrollable"
+          scrollButtons="auto"
+          textColor="inherit"
+        >
+          {tabs.map((tab, index) => (
+            <Tab 
+              key={index} 
+              label={tab.label} 
+              icon={tab.icon}
+              iconPosition="start"
+            />
+          ))}
+        </Tabs>
+      </AppBar>
+
+      <Container maxWidth="xl" sx={{ mt: 2 }}>
+        {tabs.map((tab, index) => (
+          <TabPanel key={index} value={currentTab} index={index}>
+            {tab.component}
+          </TabPanel>
+        ))}
+      </Container>
+    </Box>
+  );
+};
+
+export default AdminApp;
+
+D:\Apps test\checklist-pwa\frontend\src\components\roles\OperatorApp.js
+import React, { useState } from 'react';
+import {
+  AppBar,
+  Toolbar,
+  Typography,
+  Container,
+  Tabs,
+  Tab,
+  Box,
+  IconButton,
+  Menu,
+  MenuItem,
+  Badge
+} from '@mui/material';
+import {
+  AccountCircle,
+  ExitToApp,
+  Checklist,
+  Notifications
+} from '@mui/icons-material';
+import { useAuth } from '../../context/AuthContext';
+
+// Componentes de Operador
+import OperatorChecklists from '../operator/OperatorChecklists';
+import NotificationsOperator from '../operator/NotificationsOperator';
+
+function TabPanel({ children, value, index, ...other }) {
+  return (
+    <div
+      role="tabpanel"
+      hidden={value !== index}
+      id={`operator-tabpanel-${index}`}
+      aria-labelledby={`operator-tab-${index}`}
+      {...other}
+    >
+      {value === index && <Box sx={{ p: 3 }}>{children}</Box>}
+    </div>
+  );
+}
+
+const OperatorApp = () => {
+  const [currentTab, setCurrentTab] = useState(0);
+  const [anchorEl, setAnchorEl] = useState(null);
+  const { currentUser, logout } = useAuth();
+
+  const handleTabChange = (event, newValue) => {
+    setCurrentTab(newValue);
+  };
+
+  const handleMenu = (event) => {
+    setAnchorEl(event.currentTarget);
+  };
+
+  const handleClose = () => {
+    setAnchorEl(null);
+  };
+
+  const handleLogout = () => {
+    logout();
+    handleClose();
+  };
+
+  const tabs = [
+    { 
+      label: 'Mis Checklists', 
+      icon: <Checklist />, 
+      component: <OperatorChecklists />,
+      badge: 3 // Número de checklists pendientes
+    },
+    { 
+      label: 'Notificaciones', 
+      icon: <Notifications />, 
+      component: <NotificationsOperator />,
+      badge: 5 // Número de notificaciones
+    }
+  ];
+
+  return (
+    <Box sx={{ flexGrow: 1 }}>
+      <AppBar position="static">
+        <Toolbar>
+          <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
+            Panel de Operador
+          </Typography>
+          <Typography variant="body2" sx={{ mr: 2 }}>
+            {currentUser?.name}
+          </Typography>
+          <IconButton
+            size="large"
+            aria-label="account of current user"
+            aria-controls="menu-appbar"
+            aria-haspopup="true"
+            onClick={handleMenu}
+            color="inherit"
+          >
+            <AccountCircle />
+          </IconButton>
+          <Menu
+            id="menu-appbar"
+            anchorEl={anchorEl}
+            anchorOrigin={{
+              vertical: 'top',
+              horizontal: 'right',
+            }}
+            keepMounted
+            transformOrigin={{
+              vertical: 'top',
+              horizontal: 'right',
+            }}
+            open={Boolean(anchorEl)}
+            onClose={handleClose}
+          >
+            <MenuItem onClick={handleClose}>Perfil</MenuItem>
+            <MenuItem onClick={handleLogout}>
+              <ExitToApp sx={{ mr: 1 }} />
+              Cerrar Sesión
+            </MenuItem>
+          </Menu>
+        </Toolbar>
+        
+        <Tabs 
+          value={currentTab} 
+          onChange={handleTabChange}
+          variant="fullWidth"
+        >
+          {tabs.map((tab, index) => (
+            <Tab 
+              key={index} 
+              label={
+                <Badge badgeContent={tab.badge} color="error">
+                  {tab.label}
+                </Badge>
+              } 
+              icon={tab.icon} 
+            />
+          ))}
+        </Tabs>
+      </AppBar>
+
+      <Container maxWidth="lg">
+        {tabs.map((tab, index) => (
+          <TabPanel key={index} value={currentTab} index={index}>
+            {tab.component}
+          </TabPanel>
+        ))}
+      </Container>
+    </Box>
+  );
+};
+
+export default OperatorApp;
+
+D:\Apps test\checklist-pwa\frontend\src\components\roles\SupervisorApp.js
+import React, { useState } from 'react';
+import {
+  AppBar,
+  Toolbar,
+  Typography,
+  Container,
+  Tabs,
+  Tab,
+  Box,
+  IconButton,
+  Menu,
+  MenuItem
+} from '@mui/material';
+import {
+  AccountCircle,
+  ExitToApp,
+  Assignment,
+  Assessment,
+  Notifications
+} from '@mui/icons-material';
+import { useAuth } from '../../context/AuthContext';
+
+// Componentes de Supervisor
+import SupervisorDashboard from '../supervisor/SupervisorDashboard';
+import ChecklistAssignment from '../supervisor/ChecklistAssignment';
+import ReportsSupervisor from '../supervisor/ReportsSupervisor';
+import NotificationsSupervisor from '../supervisor/NotificationsSupervisor';
+
+function TabPanel({ children, value, index, ...other }) {
+  return (
+    <div
+      role="tabpanel"
+      hidden={value !== index}
+      id={`supervisor-tabpanel-${index}`}
+      aria-labelledby={`supervisor-tab-${index}`}
+      {...other}
+    >
+      {value === index && <Box sx={{ p: 3 }}>{children}</Box>}
+    </div>
+  );
+}
+
+const SupervisorApp = () => {
+  const [currentTab, setCurrentTab] = useState(0);
+  const [anchorEl, setAnchorEl] = useState(null);
+  const { currentUser, logout } = useAuth();
+
+  const handleTabChange = (event, newValue) => {
+    setCurrentTab(newValue);
+  };
+
+  const handleMenu = (event) => {
+    setAnchorEl(event.currentTarget);
+  };
+
+  const handleClose = () => {
+    setAnchorEl(null);
+  };
+
+  const handleLogout = () => {
+    logout();
+    handleClose();
+  };
+
+  const tabs = [
+    { label: 'Dashboard', icon: <Assessment />, component: <SupervisorDashboard /> },
+    { label: 'Asignar Checklists', icon: <Assignment />, component: <ChecklistAssignment /> },
+    { label: 'Reportes', icon: <Assessment />, component: <ReportsSupervisor /> },
+    { label: 'Notificaciones', icon: <Notifications />, component: <NotificationsSupervisor /> }
+  ];
+
+  return (
+    <Box sx={{ flexGrow: 1 }}>
+      <AppBar position="static">
+        <Toolbar>
+          <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
+            Panel de Supervisor
+          </Typography>
+          <Typography variant="body2" sx={{ mr: 2 }}>
+            {currentUser?.name}
+          </Typography>
+          <IconButton
+            size="large"
+            aria-label="account of current user"
+            aria-controls="menu-appbar"
+            aria-haspopup="true"
+            onClick={handleMenu}
+            color="inherit"
+          >
+            <AccountCircle />
+          </IconButton>
+          <Menu
+            id="menu-appbar"
+            anchorEl={anchorEl}
+            anchorOrigin={{
+              vertical: 'top',
+              horizontal: 'right',
+            }}
+            keepMounted
+            transformOrigin={{
+              vertical: 'top',
+              horizontal: 'right',
+            }}
+            open={Boolean(anchorEl)}
+            onClose={handleClose}
+          >
+            <MenuItem onClick={handleClose}>Perfil</MenuItem>
+            <MenuItem onClick={handleLogout}>
+              <ExitToApp sx={{ mr: 1 }} />
+              Cerrar Sesión
+            </MenuItem>
+          </Menu>
+        </Toolbar>
+        
+        <Tabs 
+          value={currentTab} 
+          onChange={handleTabChange}
+          variant="scrollable"
+          scrollButtons="auto"
+        >
+          {tabs.map((tab, index) => (
+            <Tab key={index} label={tab.label} icon={tab.icon} />
+          ))}
+        </Tabs>
+      </AppBar>
+
+      <Container maxWidth="xl">
+        {tabs.map((tab, index) => (
+          <TabPanel key={index} value={currentTab} index={index}>
+            {tab.component}
+          </TabPanel>
+        ))}
+      </Container>
+    </Box>
+  );
+};
+
+export default SupervisorApp;
+
+D:\Apps test\checklist-pwa\frontend\src\components\supervisor\ChecklistAssignment.js
+import React, { useState } from 'react';
+import {
+  Typography, Paper, Button, Table, TableBody, TableCell,
+  TableContainer, TableHead, TableRow, IconButton, Chip, Box
+} from '@mui/material';
+import { Assignment, Edit } from '@mui/icons-material';
+
+const ChecklistAssignment = () => {
+  const [assignments] = useState([
+    { id: '1', checklist: 'Arranque Máquina ABC', operator: 'Carlos López', frequency: 'Cada hora', status: 'Activo' },
+    { id: '2', checklist: 'Checklist Seguridad', operator: 'Ana Martínez', frequency: 'Diario', status: 'Activo' }
+  ]);
+
+  return (
+    <Box>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 3 }}>
+        <Typography variant="h4">
+          Asignación de Checklists
+        </Typography>
+        <Button variant="contained" startIcon={<Assignment />}>
+          Asignar Checklist
+        </Button>
+      </Box>
+
+      <TableContainer component={Paper}>
+        <Table>
+          <TableHead>
+            <TableRow>
+              <TableCell>Checklist</TableCell>
+              <TableCell>Operador</TableCell>
+              <TableCell>Frecuencia</TableCell>
+              <TableCell>Estado</TableCell>
+              <TableCell>Acciones</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {assignments.map((assignment) => (
+              <TableRow key={assignment.id}>
+                <TableCell>{assignment.checklist}</TableCell>
+                <TableCell>{assignment.operator}</TableCell>
+                <TableCell>
+                  <Chip label={assignment.frequency} size="small" />
+                </TableCell>
+                <TableCell>
+                  <Chip 
+                    label={assignment.status} 
+                    color={assignment.status === 'Activo' ? 'success' : 'default'}
+                    size="small"
+                  />
+                </TableCell>
+                <TableCell>
+                  <IconButton color="primary">
+                    <Edit />
+                  </IconButton>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </TableContainer>
+    </Box>
+  );
+};
+
+export default ChecklistAssignment;
+
+D:\Apps test\checklist-pwa\frontend\src\components\supervisor\NotificationsSupervisor.js
+import React from 'react';
+import { Typography, Paper, List, ListItem, ListItemText, Chip, Box } from '@mui/material';
+
+const NotificationsSupervisor = () => {
+  const notifications = [
+    { id: 1, message: 'Carlos López tiene checklist pendiente', type: 'warning', time: 'Hace 1 hora' },
+    { id: 2, message: 'Ana Martínez completó checklist', type: 'success', time: 'Hace 2 horas' },
+    { id: 3, message: 'Recordatorio: Revisar reportes semanales', type: 'info', time: 'Hace 1 día' }
+  ];
+
+  return (
+    <Box>
+      <Typography variant="h4" gutterBottom>
+        Notificaciones de Mi Área
+      </Typography>
+      
+      <Paper>
+        <List>
+          {notifications.map((notification) => (
+            <ListItem key={notification.id} divider>
+              <ListItemText
+                primary={notification.message}
+                secondary={notification.time}
+              />
+              <Chip 
+                label={notification.type} 
+                color={
+                  notification.type === 'info' ? 'info' :
+                  notification.type === 'success' ? 'success' : 'warning'
+                }
+                size="small"
+              />
+            </ListItem>
+          ))}
+        </List>
+      </Paper>
+    </Box>
+  );
+};
+
+export default NotificationsSupervisor;
+
+D:\Apps test\checklist-pwa\frontend\src\components\supervisor\ReportsSupervisor.js
+import React from 'react';
+import { Typography, Paper, Grid, Box } from '@mui/material';
+
+const ReportsSupervisor = () => {
+  return (
+    <Box>
+      <Typography variant="h4" gutterBottom>
+        Reportes de Supervisor
+      </Typography>
+      
+      <Grid container spacing={3}>
+        <Grid item xs={12} md={6}>
+          <Paper sx={{ p: 3 }}>
+            <Typography variant="h6" gutterBottom>
+              Cumplimiento de Mi Equipo
+            </Typography>
+            <Typography>
+              Reporte de cumplimiento de checklists por operador...
+            </Typography>
+          </Paper>
+        </Grid>
+        
+        <Grid item xs={12} md={6}>
+          <Paper sx={{ p: 3 }}>
+            <Typography variant="h6" gutterBottom>
+              Tendencias Semanales
+            </Typography>
+            <Typography>
+              Análisis de tendencias de cumplimiento...
+            </Typography>
+          </Paper>
+        </Grid>
+      </Grid>
+    </Box>
+  );
+};
+
+export default ReportsSupervisor;
+
+D:\Apps test\checklist-pwa\frontend\src\components\supervisor\SupervisorDashboard.js
+import React from 'react';
+import { Typography, Paper, Grid, Card, CardContent, Box } from '@mui/material';
+import { Assessment, People, Checklist, Schedule } from '@mui/icons-material';
+
+const SupervisorDashboard = () => {
+  const stats = [
+    { title: 'Checklists Pendientes', value: '8', icon: <Checklist />, color: 'warning' },
+    { title: 'Operadores Activos', value: '5', icon: <People />, color: 'success' },
+    { title: 'Completados Hoy', value: '12', icon: <Assessment />, color: 'primary' },
+    { title: 'Vencidos', value: '2', icon: <Schedule />, color: 'error' }
+  ];
+
+  return (
+    <Box>
+      <Typography variant="h4" gutterBottom>
+        Dashboard de Supervisor
+      </Typography>
+      
+      <Grid container spacing={3} sx={{ mb: 4 }}>
+        {stats.map((stat, index) => (
+          <Grid item xs={12} sm={6} md={3} key={index}>
+            <Card>
+              <CardContent>
+                <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                  <Box sx={{ mr: 2, color: `${stat.color}.main` }}>
+                    {stat.icon}
+                  </Box>
+                  <Box>
+                    <Typography variant="h4" component="div">
+                      {stat.value}
+                    </Typography>
+                    <Typography variant="body2" color="textSecondary">
+                      {stat.title}
+                    </Typography>
+                  </Box>
+                </Box>
+              </CardContent>
+            </Card>
+          </Grid>
+        ))}
+      </Grid>
+
+      <Paper sx={{ p: 3 }}>
+        <Typography variant="h6" gutterBottom>
+          Resumen de Mi Área
+        </Typography>
+        <Typography>
+          Bienvenido al panel de supervisor. Aquí puedes gestionar los checklists de tus operadores.
+        </Typography>
+      </Paper>
+    </Box>
+  );
+};
+
+export default SupervisorDashboard;
+
+D:\Apps test\checklist-pwa\frontend\src\components\PushNotifications.js
+import { useEffect } from 'react';
+
+export const usePushNotifications = () => {
+  useEffect(() => {
+    if ('Notification' in window) {
+      Notification.requestPermission().then(permission => {
+        if (permission === 'granted') {
+          console.log('Notificaciones permitidas');
+        }
+      });
+    }
+  }, []);
+};
+
+export const showNotification = (title, options = {}) => {
+  if ('Notification' in window && Notification.permission === 'granted') {
+    new Notification(title, {
+      icon: '/logo192.png',
+      badge: '/logo192.png',
+      ...options
+    });
+  }
+};
+
+D:\Apps test\checklist-pwa\frontend\src\context\AuthContext.js
+import React, { createContext, useState, useContext, useEffect } from 'react';
+import { authService } from '../services/api';
+
+const AuthContext = createContext();
+
+export const useAuth = () => {
+  return useContext(AuthContext);
+};
+
+export const AuthProvider = ({ children }) => {
+  const [currentUser, setCurrentUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    checkAuth();
+  }, []);
+
+  const checkAuth = async () => {
+    try {
+      const token = localStorage.getItem('authToken');
+      console.log('🔐 Verificando autenticación, token presente:', !!token);
+      
+      if (token) {
+        const response = await authService.getMe();
+        console.log('✅ Usuario autenticado:', response.data.user);
+        setCurrentUser(response.data.user);
+      } else {
+        console.log('🔓 No hay sesión activa');
+      }
+    } catch (error) {
+      console.log('❌ Error verificando autenticación:', error);
+      localStorage.removeItem('authToken');
+    } finally {
+      setLoading(false);
+      console.log('🏁 Carga de autenticación completada');
+    }
+  };
+
+  const login = async (username, password) => {
+    try {
+      console.log('🔐 Intentando login para:', username);
+      const response = await authService.login(username, password);
+      if (response.data.success) {
+        console.log('✅ Login exitoso');
+        setCurrentUser(response.data.user);
+        localStorage.setItem('authToken', response.data.token);
+        return { success: true };
+      } else {
+        console.log('❌ Login fallido:', response.data.message);
+        return { success: false, message: response.data.message };
+      }
+    } catch (error) {
+      console.log('❌ Error de conexión en login:', error);
+      return { success: false, message: 'Error de conexión' };
+    }
+  };
+
+  const logout = () => {
+    console.log('🚪 Cerrando sesión');
+    setCurrentUser(null);
+    localStorage.removeItem('authToken');
+  };
+
+  const value = {
+    currentUser,
+    login,
+    logout,
+    loading
+  };
+
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+D:\Apps test\checklist-pwa\frontend\src\context\ChecklistContext.js
+import React, { createContext, useState, useEffect } from 'react';
+import { checklistService } from '../services/api';
+
+export const ChecklistContext = createContext();
+
+export const ChecklistProvider = ({ children }) => {
+  const [checklists, setChecklists] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadChecklists();
+  }, []);
+
+  const loadChecklists = async () => {
+    try {
+      setLoading(true);
+      const response = await checklistService.getAll();
+      setChecklists(response.data);
+    } catch (error) {
+      console.error('Error cargando checklists:', error);
+      // En caso de error, usar datos mock
+      const mockChecklists = [
+        {
+          id: '1',
+          name: 'Arranque de Máquina ABC',
+          area: 'Producción',
+          project: 'Proyecto X',
+          status: 'pending',
+          iatfCode: 'IATF-MQ-001',
+          questions: [
+            {
+              id: 'q1',
+              type: 'boolean',
+              text: '¿La máquina está limpia y libre de obstrucciones?'
+            },
+            {
+              id: 'q2',
+              type: 'number',
+              text: 'Temperatura de operación inicial'
+            },
+            {
+              id: 'q3',
+              type: 'text',
+              text: 'Observaciones adicionales'
+            }
+          ]
+        },
+        {
+          id: '2',
+          name: 'Checklist Seguridad Turno',
+          area: 'Seguridad',
+          project: 'General',
+          status: 'completed',
+          completedAt: new Date().toISOString(),
+          iatfCode: 'IATF-SEG-002',
+          questions: []
+        }
+      ];
+      setChecklists(mockChecklists);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitChecklist = async (checklistId, answers) => {
+    try {
+      const response = await checklistService.submit(checklistId, answers);
+      await loadChecklists(); // Recargar la lista
+      return response.data;
+    } catch (error) {
+      console.error('Error enviando checklist:', error);
+      // Simular éxito si el backend no responde
+      setChecklists(prev => 
+        prev.map(checklist => 
+          checklist.id === checklistId 
+            ? { 
+                ...checklist, 
+                status: 'completed',
+                completedAt: new Date().toISOString(),
+                answers 
+              }
+            : checklist
+        )
+      );
+      return { success: true };
+    }
+  };
+
+  return (
+    <ChecklistContext.Provider value={{
+      checklists,
+      loading,
+      submitChecklist,
+      loadChecklists
+    }}>
+      {children}
+    </ChecklistContext.Provider>
+  );
+};
+
+D:\Apps test\checklist-pwa\frontend\src\hooks\useOfflineStorage.js
+import { useState, useEffect } from 'react';
+
+export const useOfflineStorage = () => {
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  const saveOfflineChecklist = (checklistData) => {
+    const offlineData = JSON.parse(localStorage.getItem('offlineChecklists') || '[]');
+    offlineData.push({
+      ...checklistData,
+      offline: true,
+      timestamp: new Date().toISOString()
+    });
+    localStorage.setItem('offlineChecklists', JSON.stringify(offlineData));
+  };
+
+  const getOfflineChecklists = () => {
+    return JSON.parse(localStorage.getItem('offlineChecklists') || '[]');
+  };
+
+  const clearOfflineChecklists = () => {
+    localStorage.removeItem('offlineChecklists');
+  };
+
+  return {
+    isOnline,
+    saveOfflineChecklist,
+    getOfflineChecklists,
+    clearOfflineChecklists
+  };
+};
+
+D:\Apps test\checklist-pwa\frontend\src\pages\ChecklistPage.js
+import React, { useState, useContext, useEffect } from 'react';
+import {
+  Card,
+  CardContent,
+  Typography,
+  Button,
+  Grid,
+  Chip,
+  LinearProgress,
+  Box,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  FormControlLabel,
+  Checkbox,
+  TextField,
+  RadioGroup,
+  Radio,
+  FormLabel
+} from '@mui/material';
+import { PlayArrow, CheckCircle, Pending } from '@mui/icons-material';
+import { ChecklistContext } from '../context/ChecklistContext';
+
+const ChecklistPage = () => {
+  const { checklists, submitChecklist } = useContext(ChecklistContext);
+  const [selectedChecklist, setSelectedChecklist] = useState(null);
+  const [answers, setAnswers] = useState({});
+  const [openDialog, setOpenDialog] = useState(false);
+
+  const pendingChecklists = checklists.filter(c => c.status === 'pending');
+  const completedChecklists = checklists.filter(c => c.status === 'completed');
+
+  const handleStartChecklist = (checklist) => {
+    setSelectedChecklist(checklist);
+    setAnswers({});
+    setOpenDialog(true);
+  };
+
+  const handleAnswerChange = (questionId, value) => {
+    setAnswers(prev => ({
+      ...prev,
+      [questionId]: value
+    }));
+  };
+
+  const handleSubmit = async () => {
+    try {
+      await submitChecklist(selectedChecklist.id, answers);
+      setOpenDialog(false);
+      setSelectedChecklist(null);
+      setAnswers({});
+    } catch (error) {
+      console.error('Error al enviar checklist:', error);
+    }
+  };
+
+  const renderQuestion = (question) => {
+    switch (question.type) {
+      case 'boolean':
+        return (
+          <RadioGroup
+            value={answers[question.id] || ''}
+            onChange={(e) => handleAnswerChange(question.id, e.target.value)}
+          >
+            <FormControlLabel value="si" control={<Radio />} label="Sí" />
+            <FormControlLabel value="no" control={<Radio />} label="No" />
+          </RadioGroup>
+        );
+      case 'number':
+        return (
+          <TextField
+            type="number"
+            fullWidth
+            value={answers[question.id] || ''}
+            onChange={(e) => handleAnswerChange(question.id, e.target.value)}
+            margin="normal"
+          />
+        );
+      case 'text':
+        return (
+          <TextField
+            fullWidth
+            multiline
+            rows={3}
+            value={answers[question.id] || ''}
+            onChange={(e) => handleAnswerChange(question.id, e.target.value)}
+            margin="normal"
+          />
+        );
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div>
+      <Typography variant="h5" gutterBottom>
+        Mis Checklists
+      </Typography>
+
+      {/* Checklists Pendientes */}
+      <Typography variant="h6" gutterBottom sx={{ mt: 3 }}>
+        Pendientes ({pendingChecklists.length})
+      </Typography>
+      <Grid container spacing={2}>
+        {pendingChecklists.map((checklist) => (
+          <Grid item xs={12} key={checklist.id}>
+            <Card>
+              <CardContent>
+                <Box display="flex" justifyContent="space-between" alignItems="center">
+                  <Box>
+                    <Typography variant="h6">{checklist.name}</Typography>
+                    <Typography variant="body2" color="textSecondary">
+                      {checklist.area} - {checklist.project}
+                    </Typography>
+                    <Chip 
+                      icon={<Pending />} 
+                      label="Pendiente" 
+                      color="warning" 
+                      size="small" 
+                      sx={{ mt: 1 }}
+                    />
+                  </Box>
+                  <Button
+                    variant="contained"
+                    startIcon={<PlayArrow />}
+                    onClick={() => handleStartChecklist(checklist)}
+                  >
+                    Comenzar
+                  </Button>
+                </Box>
+                <LinearProgress 
+                  variant="determinate" 
+                  value={0} 
+                  sx={{ mt: 2 }}
+                />
+              </CardContent>
+            </Card>
+          </Grid>
+        ))}
+      </Grid>
+
+      {/* Checklists Completados */}
+      <Typography variant="h6" gutterBottom sx={{ mt: 3 }}>
+        Completados ({completedChecklists.length})
+      </Typography>
+      <Grid container spacing={2}>
+        {completedChecklists.map((checklist) => (
+          <Grid item xs={12} key={checklist.id}>
+            <Card>
+              <CardContent>
+                <Box display="flex" justifyContent="space-between" alignItems="center">
+                  <Box>
+                    <Typography variant="h6">{checklist.name}</Typography>
+                    <Typography variant="body2" color="textSecondary">
+                      {checklist.area} - {checklist.project}
+                    </Typography>
+                    <Chip 
+                      icon={<CheckCircle />} 
+                      label="Completado" 
+                      color="success" 
+                      size="small" 
+                      sx={{ mt: 1 }}
+                    />
+                  </Box>
+                  <Typography variant="body2" color="textSecondary">
+                    {new Date(checklist.completedAt).toLocaleDateString()}
+                  </Typography>
+                </Box>
+              </CardContent>
+            </Card>
+          </Grid>
+        ))}
+      </Grid>
+
+      {/* Diálogo para llenar checklist */}
+      <Dialog 
+        open={openDialog} 
+        onClose={() => setOpenDialog(false)}
+        fullWidth
+        maxWidth="md"
+      >
+        <DialogTitle>
+          {selectedChecklist?.name}
+        </DialogTitle>
+        <DialogContent>
+          {selectedChecklist?.questions?.map((question, index) => (
+            <Box key={question.id} sx={{ mb: 3 }}>
+              <FormLabel component="legend">
+                {index + 1}. {question.text}
+              </FormLabel>
+              {renderQuestion(question)}
+            </Box>
+          ))}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOpenDialog(false)}>
+            Cancelar
+          </Button>
+          <Button 
+            variant="contained" 
+            onClick={handleSubmit}
+            disabled={Object.keys(answers).length !== selectedChecklist?.questions?.length}
+          >
+            Enviar Checklist
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </div>
+  );
+};
+
+export default ChecklistPage;
+
+D:\Apps test\checklist-pwa\frontend\src\pages\LoginPage.js
+import React, { useState } from 'react';
+import {
+  Container,
+  Paper,
+  TextField,
+  Button,
+  Typography,
+  Box,
+  Alert,
+  Card,
+  CardContent
+} from '@mui/material';
+import { Checklist } from '@mui/icons-material';
+import { useAuth } from '../context/AuthContext';
+
+const LoginPage = () => {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const { login, loading } = useAuth();
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    
+    const result = await login(username, password);
+    if (!result.success) {
+      setError(result.message);
+    }
+  };
+
+  const fillDemoCredentials = (role) => {
+    switch(role) {
+      case 'admin':
+        setUsername('Admin');
+        setPassword('0000');
+        break;
+      case 'supervisor':
+        setUsername('Supervisor');
+        setPassword('1111');
+        break;
+      case 'operator':
+        setUsername('Operador');
+        setPassword('2222');
+        break;
+    }
+  };
+
+  return (
+    <Container component="main" maxWidth="sm">
+      <Box
+        sx={{
+          minHeight: '100vh',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+          alignItems: 'center',
+        }}
+      >
+        <Card elevation={6} sx={{ width: '100%' }}>
+          <CardContent sx={{ p: 4 }}>
+            <Box sx={{ textAlign: 'center', mb: 3 }}>
+              <Checklist sx={{ fontSize: 48, color: 'primary.main', mb: 2 }} />
+              <Typography component="h1" variant="h4" gutterBottom>
+                Sistema de Checklists
+              </Typography>
+              <Typography variant="body1" color="textSecondary">
+                Ingrese sus credenciales para acceder
+              </Typography>
+            </Box>
+
+            {error && (
+              <Alert severity="error" sx={{ mb: 2 }}>
+                {error}
+              </Alert>
+            )}
+
+            <Box component="form" onSubmit={handleSubmit}>
+              <TextField
+                margin="normal"
+                required
+                fullWidth
+                label="Usuario"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoFocus
+              />
+              <TextField
+                margin="normal"
+                required
+                fullWidth
+                label="Contraseña"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+              <Button
+                type="submit"
+                fullWidth
+                variant="contained"
+                size="large"
+                sx={{ mt: 3, mb: 2 }}
+                disabled={loading}
+              >
+                {loading ? 'Ingresando...' : 'Ingresar'}
+              </Button>
+            </Box>
+
+            <Box sx={{ mt: 3, borderTop: 1, borderColor: 'divider', pt: 2 }}>
+              <Typography variant="body2" color="textSecondary" gutterBottom>
+                Credenciales de demo:
+              </Typography>
+              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                <Button 
+                  variant="outlined" 
+                  size="small"
+                  onClick={() => fillDemoCredentials('admin')}
+                >
+                  Admin (0000)
+                </Button>
+                <Button 
+                  variant="outlined" 
+                  size="small"
+                  onClick={() => fillDemoCredentials('supervisor')}
+                >
+                  Supervisor (1111)
+                </Button>
+                <Button 
+                  variant="outlined" 
+                  size="small"
+                  onClick={() => fillDemoCredentials('operator')}
+                >
+                  Operador (2222)
+                </Button>
+              </Box>
+            </Box>
+          </CardContent>
+        </Card>
+      </Box>
+    </Container>
+  );
+};
+
+export default LoginPage;
+
+D:\Apps test\checklist-pwa\frontend\src\pages\NotificationsPage.js
+import React, { useState } from 'react';
+import {
+  Card,
+  CardContent,
+  Typography,
+  List,
+  ListItem,
+  ListItemIcon,
+  ListItemText,
+  Chip,
+  Box
+} from '@mui/material';
+import {
+  Notifications as NotificationsIcon,
+  Warning,
+  Info,
+  CheckCircle
+} from '@mui/icons-material';
+
+const NotificationsPage = () => {
+  const [notifications] = useState([
+    {
+      id: 1,
+      type: 'warning',
+      title: 'Checklist pendiente',
+      message: 'El checklist de arranque de máquina está pendiente',
+      time: 'Hace 2 horas',
+      read: false
+    },
+    {
+      id: 2,
+      type: 'info',
+      title: 'Nuevo checklist asignado',
+      message: 'Se te ha asignado un nuevo checklist de seguridad',
+      time: 'Hace 1 día',
+      read: true
+    },
+    {
+      id: 3,
+      type: 'success',
+      title: 'Checklist completado',
+      message: 'Checklist de producción completado correctamente',
+      time: 'Hace 2 días',
+      read: true
+    }
+  ]);
+
+  const getIcon = (type) => {
+    switch (type) {
+      case 'warning':
+        return <Warning color="warning" />;
+      case 'info':
+        return <Info color="info" />;
+      case 'success':
+        return <CheckCircle color="success" />;
+      default:
+        return <NotificationsIcon />;
+    }
+  };
+
+  const getChipColor = (type) => {
+    switch (type) {
+      case 'warning':
+        return 'warning';
+      case 'info':
+        return 'info';
+      case 'success':
+        return 'success';
+      default:
+        return 'default';
+    }
+  };
+
+  return (
+    <div>
+      <Typography variant="h5" gutterBottom>
+        Notificaciones
+      </Typography>
+
+      <Card>
+        <CardContent>
+          <List>
+            {notifications.map((notification) => (
+              <ListItem key={notification.id} divider>
+                <ListItemIcon>
+                  {getIcon(notification.type)}
+                </ListItemIcon>
+                <ListItemText
+                  primary={
+                    <Box display="flex" alignItems="center" mb={1}>
+                      <Typography variant="subtitle1">
+                        {notification.title}
+                      </Typography>
+                      <Chip 
+                        label={notification.type} 
+                        color={getChipColor(notification.type)}
+                        size="small" 
+                        sx={{ ml: 1 }}
+                      />
+                      {!notification.read && (
+                        <Chip 
+                          label="Nuevo" 
+                          color="primary" 
+                          size="small" 
+                          sx={{ ml: 1 }}
+                        />
+                      )}
+                    </Box>
+                  }
+                  secondary={
+                    <Box>
+                      <Typography variant="body2">
+                        {notification.message}
+                      </Typography>
+                      <Typography variant="caption" color="textSecondary">
+                        {notification.time}
+                      </Typography>
+                    </Box>
+                  }
+                />
+              </ListItem>
+            ))}
+          </List>
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
+export default NotificationsPage;
+
+D:\Apps test\checklist-pwa\frontend\src\pages\ProfilePage.js
+import React from 'react';
+import {
+  Card,
+  CardContent,
+  Typography,
+  List,
+  ListItem,
+  ListItemIcon,
+  ListItemText,
+  Avatar,
+  Box
+} from '@mui/material';
+import {
+  Person,
+  Email,
+  Business,
+  Engineering
+} from '@mui/icons-material';
+
+const ProfilePage = () => {
+  const user = {
+    name: 'Operador Ejemplo',
+    email: 'operador@empresa.com',
+    role: 'Operador de Producción',
+    area: 'Producción',
+    employeeId: 'OP-001'
+  };
+
+  return (
+    <div>
+      <Typography variant="h5" gutterBottom>
+        Mi Perfil
+      </Typography>
+
+      <Card>
+        <CardContent>
+          <Box display="flex" alignItems="center" mb={3}>
+            <Avatar sx={{ width: 64, height: 64, mr: 2 }}>
+              {user.name.charAt(0)}
+            </Avatar>
+            <Box>
+              <Typography variant="h6">{user.name}</Typography>
+              <Typography variant="body2" color="textSecondary">
+                {user.employeeId}
+              </Typography>
+            </Box>
+          </Box>
+
+          <List>
+            <ListItem>
+              <ListItemIcon>
+                <Email />
+              </ListItemIcon>
+              <ListItemText 
+                primary="Email" 
+                secondary={user.email}
+              />
+            </ListItem>
+
+            <ListItem>
+              <ListItemIcon>
+                <Business />
+              </ListItemIcon>
+              <ListItemText 
+                primary="Área" 
+                secondary={user.area}
+              />
+            </ListItem>
+
+            <ListItem>
+              <ListItemIcon>
+                <Engineering />
+              </ListItemIcon>
+              <ListItemText 
+                primary="Puesto" 
+                secondary={user.role}
+              />
+            </ListItem>
+          </List>
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
+export default ProfilePage;
+
+D:\Apps test\checklist-pwa\frontend\src\pages\ReportsPage.js
+import React from 'react';
+import {
+  Card,
+  CardContent,
+  Typography,
+  Grid,
+  LinearProgress,
+  Box
+} from '@mui/material';
+import { Assessment, CheckCircle, Pending } from '@mui/icons-material';
+
+const ReportsPage = () => {
+  const reportData = {
+    weekly: {
+      period: 'Semana 45 - 2023',
+      total: 15,
+      completed: 12,
+      pending: 3,
+      rate: 80
+    },
+    monthly: {
+      period: 'Noviembre 2023',
+      total: 60,
+      completed: 48,
+      pending: 12,
+      rate: 80
+    }
+  };
+
+  return (
+    <div>
+      <Typography variant="h5" gutterBottom>
+        Reportes y Estadísticas
+      </Typography>
+
+      <Grid container spacing={3}>
+        {/* Reporte Semanal */}
+        <Grid item xs={12} md={6}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Reporte Semanal
+              </Typography>
+              <Typography variant="body2" color="textSecondary" gutterBottom>
+                {reportData.weekly.period}
+              </Typography>
+              
+              <Box display="flex" alignItems="center" mb={2}>
+                <CheckCircle color="success" sx={{ mr: 1 }} />
+                <Typography variant="body2">
+                  Completados: {reportData.weekly.completed}
+                </Typography>
+              </Box>
+              
+              <Box display="flex" alignItems="center" mb={2}>
+                <Pending color="warning" sx={{ mr: 1 }} />
+                <Typography variant="body2">
+                  Pendientes: {reportData.weekly.pending}
+                </Typography>
+              </Box>
+
+              <Box mb={2}>
+                <Typography variant="body2" gutterBottom>
+                  Tasa de completado: {reportData.weekly.rate}%
+                </Typography>
+                <LinearProgress 
+                  variant="determinate" 
+                  value={reportData.weekly.rate} 
+                  color="success"
+                />
+              </Box>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* Reporte Mensual */}
+        <Grid item xs={12} md={6}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Reporte Mensual
+              </Typography>
+              <Typography variant="body2" color="textSecondary" gutterBottom>
+                {reportData.monthly.period}
+              </Typography>
+              
+              <Box display="flex" alignItems="center" mb={2}>
+                <CheckCircle color="success" sx={{ mr: 1 }} />
+                <Typography variant="body2">
+                  Completados: {reportData.monthly.completed}
+                </Typography>
+              </Box>
+              
+              <Box display="flex" alignItems="center" mb={2}>
+                <Pending color="warning" sx={{ mr: 1 }} />
+                <Typography variant="body2">
+                  Pendientes: {reportData.monthly.pending}
+                </Typography>
+              </Box>
+
+              <Box mb={2}>
+                <Typography variant="body2" gutterBottom>
+                  Tasa de completado: {reportData.monthly.rate}%
+                </Typography>
+                <LinearProgress 
+                  variant="determinate" 
+                  value={reportData.monthly.rate} 
+                  color="success"
+                />
+              </Box>
+            </CardContent>
+          </Card>
+        </Grid>
+      </Grid>
+    </div>
+  );
+};
+
+export default ReportsPage;
+
+D:\Apps test\checklist-pwa\frontend\src\services\api.js
+import axios from 'axios';
+
+// URL CORREGIDA - BaseURL sin '/api' al final
+const API_BASE_URL = window.location.origin === 'http://localhost:3000' 
+  ? 'http://localhost:5000'  // ← SOLO localhost:5000
+  : ''; // En producción
+
+const api = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 15000,
+  headers: {
+    'Content-Type': 'application/json',
+  }
+});
+
+// Interceptor para debug
+api.interceptors.request.use(
+  (config) => {
+    console.log(`🚀 ${config.method.toUpperCase()} ${config.baseURL}${config.url}`);
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  }
+);
+
+export default api;
+
+D:\Apps test\checklist-pwa\frontend\src\services\realApiService.js
+import axios from 'axios';
+
+// URL base - Ajustada para tu configuración actual
+const API_BASE_URL = process.env.NODE_ENV === 'production' 
+  ? ''  // En producción usa la misma URL del servidor
+  : 'http://localhost:5000';  // En desarrollo
+
+const api = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 15000,
+  headers: {
+    'Content-Type': 'application/json',
+  }
+});
+
+// Interceptor para debug
+api.interceptors.request.use(
+  (config) => {
+    // Añadir token si existe
+    const token = localStorage.getItem('authToken');
+    if (token) {
+      config.headers.Authorization = token;
+    }
+    
+    console.log(`🚀 ${config.method.toUpperCase()} ${config.baseURL}${config.url}`);
+    return config;
+  },
+  (error) => {
+    console.error('❌ Error en request:', error);
+    return Promise.reject(error);
+  }
+);
+
+// Interceptor para manejar respuestas
+api.interceptors.response.use(
+  (response) => {
+    console.log(`✅ ${response.status} ${response.config.url}`);
+    return response;
+  },
+  (error) => {
+    console.error('❌ API Error:', {
+      url: error.config?.url,
+      status: error.response?.status,
+      message: error.response?.data?.message || error.message
+    });
+    
+    // Si es error 401 (no autorizado), limpiar token
+    if (error.response?.status === 401) {
+      localStorage.removeItem('authToken');
+      window.location.href = '/';
+    }
+    
+    return Promise.reject(error);
+  }
+);
+
+// Servicios unificados
+export const apiService = {
+  // Auth
+  login: (username, password) => api.post('/api/auth/login', { username, password }),
+  getMe: () => api.get('/api/auth/me'),
+  
+  // Checklists
+  getAllChecklists: () => api.get('/api/checklists'),
+  getChecklistById: (id) => api.get(`/api/checklists/${id}`),
+  createChecklist: (data) => api.post('/api/checklists', data),
+  updateChecklist: (id, data) => api.put(`/api/checklists/${id}`, data),
+  deleteChecklist: (id) => api.delete(`/api/checklists/${id}`),
+  
+  // Áreas
+  getAreas: () => api.get('/api/areas'),
+  createArea: (data) => api.post('/api/areas', data),
+  updateArea: (id, data) => api.put(`/api/areas/${id}`, data),
+  deleteArea: (id) => api.delete(`/api/areas/${id}`),
+  
+  // Proyectos
+  getProjects: () => api.get('/api/projects'),
+  createProject: (data) => api.post('/api/projects', data),
+  updateProject: (id, data) => api.put(`/api/projects/${id}`, data),
+  deleteProject: (id) => api.delete(`/api/projects/${id}`),
+  
+  // Usuarios
+  getUsers: () => api.get('/api/users'),
+  getUserById: (id) => api.get(`/api/users/${id}`),
+  createUser: (data) => api.post('/api/users', data),
+  updateUser: (id, data) => api.put(`/api/users/${id}`, data),
+  deleteUser: (id) => api.delete(`/api/users/${id}`),
+  
+  // Supervisores
+  getSupervisorOperators: (supervisorId) => api.get(`/api/supervisors/${supervisorId}/operators`),
+  getAvailableOperators: (supervisorId) => api.get(`/api/supervisors/${supervisorId}/available-operators`),
+  assignOperators: (supervisorId, operatorIds) => api.post(`/api/supervisors/${supervisorId}/operators`, { operatorIds }),
+  
+  // Reportes
+  getWeeklyReports: () => api.get('/api/reports/weekly'),
+  getMonthlyReports: () => api.get('/api/reports/monthly'),
+  getAnnualReports: () => api.get('/api/reports/annual'),
+  
+  // Health check
+  getHealth: () => api.get('/api/health'),
+  getDbStatus: () => api.get('/api/db-status'),
+  getTestData: () => api.get('/api/test-data'),
+};
+
+// Exportación por defecto para compatibilidad
+export default apiService;
+
+D:\Apps test\checklist-pwa\frontend\src\styles
+
+D:\Apps test\checklist-pwa\frontend\src\theme\minthTheme.js
+import { createTheme } from '@mui/material/styles';
+
+const minthTheme = createTheme({
+  palette: {
+    primary: {
+      main: '#0056b3', // Azul corporativo Minth
+      light: '#4d88cf',
+      dark: '#003982',
+      contrastText: '#ffffff',
+    },
+    secondary: {
+      main: '#666666', // Gris profesional
+      light: '#999999',
+      dark: '#333333',
+      contrastText: '#ffffff',
+    },
+    success: {
+      main: '#28a745',
+      light: '#5cb85c',
+      dark: '#1e7e34',
+    },
+    warning: {
+      main: '#ffc107',
+      light: '#ffce3a',
+      dark: '#d39e00',
+    },
+    error: {
+      main: '#dc3545',
+      light: '#e57373',
+      dark: '#c62828',
+    },
+    background: {
+      default: '#f8f9fa',
+      paper: '#ffffff',
+    },
+    text: {
+      primary: '#333333',
+      secondary: '#666666',
+    },
+  },
+  typography: {
+    fontFamily: '"Roboto", "Helvetica", "Arial", sans-serif',
+    h4: {
+      fontWeight: 600,
+      color: '#0056b3',
+    },
+    h5: {
+      fontWeight: 600,
+      color: '#0056b3',
+    },
+    h6: {
+      fontWeight: 500,
+      color: '#333333',
+    },
+    button: {
+      fontWeight: 500,
+      textTransform: 'none',
+    },
+  },
+  components: {
+    MuiAppBar: {
+      styleOverrides: {
+        root: {
+          backgroundColor: '#0056b3',
+          background: 'linear-gradient(135deg, #0056b3 0%, #003982 100%)',
+        },
+      },
+    },
+    MuiButton: {
+      styleOverrides: {
+        root: {
+          borderRadius: 8,
+          padding: '8px 16px',
+        },
+        containedPrimary: {
+          background: 'linear-gradient(135deg, #0056b3 0%, #003982 100%)',
+          '&:hover': {
+            background: 'linear-gradient(135deg, #003982 0%, #002b63 100%)',
+          },
+        },
+      },
+    },
+    MuiCard: {
+      styleOverrides: {
+        root: {
+          borderRadius: 12,
+          boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)',
+          border: '1px solid #e0e0e0',
+        },
+      },
+    },
+    MuiTableHead: {
+      styleOverrides: {
+        root: {
+          backgroundColor: '#f5f5f5',
+        },
+      },
+    },
+  },
+});
+
+export default minthTheme;
+
+D:\Apps test\checklist-pwa\frontend\src\utils
+
+D:\Apps test\checklist-pwa\frontend\src\App.js
+import React from 'react';
+import { ThemeProvider, createTheme } from '@mui/material/styles';
+import CssBaseline from '@mui/material/CssBaseline';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import LoginPage from './pages/LoginPage';
+import minthTheme from './theme/minthTheme';
+
+// Importar componentes de roles
+const AdminApp = React.lazy(() => import('./components/roles/AdminApp'));
+const SupervisorApp = React.lazy(() => import('./components/roles/SupervisorApp'));
+const OperatorApp = React.lazy(() => import('./components/roles/OperatorApp'));
+
+// Componente de carga
+const LoadingFallback = () => (
+  <div style={{ 
+    display: 'flex', 
+    justifyContent: 'center', 
+    alignItems: 'center', 
+    height: '100vh',
+    flexDirection: 'column',
+    backgroundColor: '#f8f9fa'
+  }}>
+    <div style={{ 
+      width: '50px', 
+      height: '50px', 
+      border: '5px solid #f3f3f3',
+      borderTop: '5px solid #0056b3',
+      borderRadius: '50%',
+      animation: 'spin 1s linear infinite',
+      marginBottom: '20px'
+    }}></div>
+    <h3 style={{ color: '#0056b3', margin: 0 }}>Minth Checklists</h3>
+    <p style={{ color: '#666666', marginTop: '10px' }}>Cargando...</p>
+    
+    <style>
+      {`
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+      `}
+    </style>
+  </div>
+);
+
+function AppContent() {
+  const { currentUser, loading } = useAuth();
+
+  if (loading) {
+    return <LoadingFallback />;
+  }
+
+  if (!currentUser) {
+    return <LoginPage />;
+  }
+
+  // Renderizar aplicación según el rol
+  const renderAppByRole = () => {
+    switch (currentUser.role) {
+      case 'admin':
+        return (
+          <React.Suspense fallback={<LoadingFallback />}>
+            <AdminApp />
+          </React.Suspense>
+        );
+      case 'supervisor':
+        return (
+          <React.Suspense fallback={<LoadingFallback />}>
+            <SupervisorApp />
+          </React.Suspense>
+        );
+      case 'operator':
+        return (
+          <React.Suspense fallback={<LoadingFallback />}>
+            <OperatorApp />
+          </React.Suspense>
+        );
+      default:
+        return <LoginPage />;
+    }
+  };
+
+  return renderAppByRole();
+}
+
+function App() {
+  return (
+    <ThemeProvider theme={minthTheme}>
+      <CssBaseline />
+      <div className="App" style={{ 
+        background: 'linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%)',
+        minHeight: '100vh'
+      }}>
+        <AuthProvider>
+          <AppContent />
+        </AuthProvider>
+      </div>
+    </ThemeProvider>
+  );
+}
+
+export default App;
+
+D:\Apps test\checklist-pwa\frontend\src\index.js
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+// Registrar Service Worker para PWA
+if ('serviceWorker' in navigator && process.env.NODE_ENV === 'production') {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js')
+      .then((registration) => {
+        console.log('SW registered: ', registration);
+      })
+      .catch((registrationError) => {
+        console.log('SW registration failed: ', registrationError);
+      });
+  });
+}
+
+D:\Apps test\checklist-pwa\frontend\package-lock.json
+
+D:\Apps test\checklist-pwa\frontend\package.json
+{
+  "name": "checklist-pwa-frontend",
+  "version": "1.0.0",
+  "homepage": "/",
+  "private": true,
+  "dependencies": {
+    "@emotion/react": "^11.11.1",
+    "@emotion/styled": "^11.11.0",
+    "@mui/icons-material": "^5.14.2",
+    "@mui/lab": "^5.0.0-alpha.166",
+    "@mui/material": "^5.14.2",
+    "axios": "^1.4.0",
+    "date-fns": "^2.30.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.30.2",
+    "react-scripts": "5.0.1"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}
+
+D:\Apps test\checklist-pwa\node_modules
+//ruta con varias carpetas y archivos
+
+D:\Apps test\checklist-pwa\.env
+NODE_ENV=production
+PORT=5000
+DB_USER=postgres
+DB_HOST=localhost
+DB_NAME=minth_checklists
+DB_PASSWORD=admin
+DB_PORT=5432
+JWT_SECRET=minth_jwt_secret_2024
+
+D:\Apps test\checklist-pwa\deploy.bat
+@echo off
+echo 🔄 Actualizando Sistema de Checklists...
+echo.
+
+cd /d "D:\Apps test\checklist-pwa"
+
+echo 📦 Instalando dependencias...
+call npm install
+
+echo 🏗️ Creando build de producción...
+cd frontend
+call npm run build
+cd ..
+
+echo 🔄 Reiniciando aplicación...
+call pm2 restart checklist-app
+
+echo ✅ Actualización completada!
+echo.
+echo 📱 URL de acceso: http://192.168.0.7:5000
+echo 💻 URL local: http://localhost:5000
+echo.
+
+pause
+
+D:\Apps test\checklist-pwa\package-lock.json
+
+D:\Apps test\checklist-pwa\package.json
+{
+  "name": "checklist-pwa",
+  "version": "1.0.0",
+  "description": "Sistema de Checklists PWA",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "cd backend && nodemon server.js",
+    "client": "cd frontend && npm start",
+    "build": "cd frontend && npm run build",
+    "start": "cd backend && node server.js",
+    "install-all": "npm install && cd frontend && npm install"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "helmet": "^7.2.0",
+    "morgan": "^1.10.1",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "nodemon": "^3.1.11"
+  }
+}
+
+D:\Apps test\checklist-pwa\README.md
