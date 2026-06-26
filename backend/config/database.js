@@ -8,7 +8,8 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD || 'admin',
   port: process.env.DB_PORT || 5432,
   // Configurar zona horaria
-  timezone: 'America/Mexico_City'
+  timezone: 'America/Mexico_City',
+  family: 4
 });
 
 // Verificar conexión
